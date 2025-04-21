@@ -55,7 +55,7 @@
 	url = https://github.com/fcitx/libime-jyutping
 [submodule "librime-predict"]
 	path = librime-predict
-	url = https://github.com/rime/librime-predict
+	url = https://github.com/fxliang/librime-predict-leveldb
 [submodule "libthai"]
 	path = libthai
 	url = https://github.com/tlwg/libthai
