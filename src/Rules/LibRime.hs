@@ -42,6 +42,7 @@ librimeRule = do
             -- disable tools; remove absolute path by __FILE__ macro
             cmd_ (Cwd librimePredictSrc) "git checkout ."
             -- cmd_ (Cwd librimePredictSrc) "git apply ../patches/librime-predict.patch"
+            cmd_ (Cwd librimePredictSrc) "git submodule update --init --recursive -v"
             -- remove absolute path by __FILE__ macro
             cmd_ (Cwd src) "git checkout ."
             cmd_ (Cwd src) "git apply ../patches/librime.patch",
