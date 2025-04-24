@@ -25,7 +25,7 @@ librimeRule = do
             -- canocialize for symlink
             librimeLuaSrc <- liftIO $ canonicalizePath "librime-lua"
             librimeOctagramSrc <- liftIO $ canonicalizePath "librime-octagram"
-            librimePredictSrc <- liftIO $ canonicalizePath "librime-predict"
+            librimePredictSrc <- liftIO $ canonicalizePath "librime-predict-leveldb"
             liftIO $ do
               removePathForcibly (src </> "plugins" </> "lua")
               createDirectoryLink librimeLuaSrc (src </> "plugins" </> "lua")
@@ -41,6 +41,7 @@ librimeRule = do
             cmd_ (Cwd librimeOctagramSrc) "git apply ../patches/librime-octagram.patch"
             -- disable tools; remove absolute path by __FILE__ macro
             cmd_ (Cwd librimePredictSrc) "git checkout ."
+            cmd_ (Cwd librimePredictSrc) "git submodule update --init --recursive -v"
             cmd_ (Cwd librimePredictSrc) "git apply ../patches/librime-predict.patch"
             -- remove absolute path by __FILE__ macro
             cmd_ (Cwd src) "git checkout ."

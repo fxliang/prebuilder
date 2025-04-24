@@ -62,3 +62,6 @@
 [submodule "fcitx5"]
 	path = fcitx5
 	url = https://github.com/fcitx/fcitx5
+[submodule "librime-predict-leveldb"]
+	path = librime-predict-leveldb
+	url = https://github.com/fxliang/librime-predict-leveldb

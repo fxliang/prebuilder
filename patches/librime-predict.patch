@@ -1,9 +1,9 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 07703bf..5ab6d3b 100644
+index c8444f2..38532f7 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.10)
- aux_source_directory(src predict_src)
+@@ -5,6 +5,8 @@ aux_source_directory(src predict_src)
+ include_directories(deps/msgpack-c/include)
  
  add_library(rime-predict-objs OBJECT ${predict_src})
 +target_compile_options(rime-predict-objs PRIVATE "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
