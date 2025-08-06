@@ -1,0 +1,100 @@
+diff --git a/src/rime/context.cc b/src/rime/context.cc
+index 43f0b418..bba3ca49 100644
+--- a/src/rime/context.cc
++++ b/src/rime/context.cc
+@@ -104,10 +104,14 @@ bool Context::DeleteInput(size_t len) {
+ }
+ 
+ void Context::Clear() {
++  EndComposition();
++  update_notifier_(this);
++}
++
++void Context::EndComposition() {
+   input_.clear();
+   caret_pos_ = 0;
+   composition_.clear();
+-  update_notifier_(this);
+ }
+ 
+ bool Context::Select(size_t index) {
+diff --git a/src/rime/context.h b/src/rime/context.h
+index 6f514320..50ec13c9 100644
+--- a/src/rime/context.h
++++ b/src/rime/context.h
+@@ -41,6 +41,7 @@ class RIME_DLL Context {
+   bool PopInput(size_t len = 1);
+   bool DeleteInput(size_t len = 1);
+   void Clear();
++  void EndComposition();
+ 
+   // return false if there is no candidate at index
+   bool Select(size_t index);
+diff --git a/src/rime/service.cc b/src/rime/service.cc
+index e40493ae..840fede3 100644
+--- a/src/rime/service.cc
++++ b/src/rime/service.cc
+@@ -48,6 +48,12 @@ void Session::ClearComposition() {
+   engine_->context()->Clear();
+ }
+ 
++void Session::EndComposition() {
++  if (!engine_)
++    return;
++  engine_->context()->EndComposition();
++}
++
+ void Session::ApplySchema(Schema* schema) {
+   engine_->ApplySchema(schema);
+ }
+diff --git a/src/rime/service.h b/src/rime/service.h
+index a69ae741..be440d2a 100644
+--- a/src/rime/service.h
++++ b/src/rime/service.h
+@@ -38,6 +38,7 @@ class Session {
+   void ResetCommitText();
+   bool CommitComposition();
+   void ClearComposition();
++  void EndComposition();
+   void ApplySchema(Schema* schema);
+ 
+   Context* context() const;
+diff --git a/src/rime_api.h b/src/rime_api.h
+index 2fccde0f..acfffd49 100644
+--- a/src/rime_api.h
++++ b/src/rime_api.h
+@@ -505,6 +505,7 @@ typedef struct RIME_FLAVORED(rime_api_t) {
+                                               size_t index);
+ 
+   Bool (*change_page)(RimeSessionId session_id, Bool backward);
++  void (*end_composition)(RimeSessionId session_id);
+ } RIME_FLAVORED(RimeApi);
+ 
+ //! API entry
+diff --git a/src/rime_api_impl.h b/src/rime_api_impl.h
+index 6e906cfe..ab1f4000 100644
+--- a/src/rime_api_impl.h
++++ b/src/rime_api_impl.h
+@@ -191,6 +191,13 @@ RIME_DEPRECATED void RimeClearComposition(RimeSessionId session_id) {
+   session->ClearComposition();
+ }
+ 
++RIME_DEPRECATED void RimeEndComposition(RimeSessionId session_id) {
++  an<Session> session(Service::instance().GetSession(session_id));
++  if (!session)
++    return;
++  session->EndComposition();
++}
++
+ // output
+ 
+ static void rime_candidate_copy(RimeCandidate* dest, const an<Candidate>& src) {
+@@ -1228,6 +1235,7 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
+     s_api.highlight_candidate_on_current_page =
+         &RimeHighlightCandidateOnCurrentPage;
+     s_api.change_page = &RimeChangePage;
++    s_api.end_composition = &RimeEndComposition;
+   }
+   return &s_api;
+ }
+
