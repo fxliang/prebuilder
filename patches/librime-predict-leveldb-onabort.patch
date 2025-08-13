@@ -1,0 +1,45 @@
+diff --git a/src/predictor.cc b/src/predictor.cc
+index a3cc8f7..898fab5 100644
+--- a/src/predictor.cc
++++ b/src/predictor.cc
+@@ -25,6 +25,20 @@ Predictor::Predictor(const Ticket& ticket, an<PredictEngine> predict_engine)
+       [this](Context* ctx) { OnContextUpdate(ctx); });
+   delete_connection_ = context->delete_notifier().connect(
+       [this](Context* ctx) { OnDelete(ctx); });
++  abort_connection_ = context->abort_notifier().connect(
++      [this](Context* ctx) { OnAbort(ctx); });
++}
++
++void Predictor::OnAbort(Context* ctx) {
++  if (!predict_engine_ || !ctx || !ctx->get_option("prediction")) {
++    return;
++  }
++  predict_engine_->Clear();
++  iteration_counter_ = 0;
++  self_updating_ = true;
++  ctx->Clear();
++  ctx->update_notifier()(ctx);
++  self_updating_ = false;
+ }
+ 
+ Predictor::~Predictor() {
+diff --git a/src/predictor.h b/src/predictor.h
+index a78498f..67a9c11 100644
+--- a/src/predictor.h
++++ b/src/predictor.h
+@@ -20,6 +20,7 @@ class Predictor : public Processor {
+   void OnContextUpdate(Context* ctx);
+   void OnSelect(Context* ctx);
+   void OnDelete(Context* ctx);
++  void OnAbort(Context* ctx);
+   void PredictAndUpdate(Context* ctx, const string& context_query);
+ 
+  private:
+@@ -32,6 +33,7 @@ class Predictor : public Processor {
+   connection select_connection_;
+   connection context_update_connection_;
+   connection delete_connection_;
++  connection abort_connection_;
+ };
+ 
+ class PredictorComponent : public Predictor::Component {
