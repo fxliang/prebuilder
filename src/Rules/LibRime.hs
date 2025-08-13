@@ -43,10 +43,11 @@ librimeRule = do
             cmd_ (Cwd librimePredictSrc) "git checkout ."
             cmd_ (Cwd librimePredictSrc) "git submodule update --init --recursive -v"
             cmd_ (Cwd librimePredictSrc) "git apply ../patches/librime-predict.patch"
+            cmd_ (Cwd librimePredictSrc) "git apply ../patches/librime-predict-leveldb-onabort.patch"
             -- remove absolute path by __FILE__ macro
             cmd_ (Cwd src) "git checkout ."
             cmd_ (Cwd src) "git apply ../patches/librime.patch"
-            cmd_ (Cwd src) "git apply ../patches/librime-endcomposition.patch",
+            cmd_ (Cwd src) "git apply ../patches/librime-abort.patch",
           cmakeFlags = \BuildEnv {..} ->
             [ "-DBUILD_SHARED_LIBS=OFF",
               "-DBUILD_STATIC=ON",
