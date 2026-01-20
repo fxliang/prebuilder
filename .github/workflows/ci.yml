@@ -27,7 +27,7 @@ jobs:
             cmake extra-cmake-modules ninja \
             fmt boost \
             python opencc \
-            gperf
+            gperf github-cli
 
       - name: Fetch source code
         uses: actions/checkout@v4
