@@ -97,3 +97,10 @@ jobs:
           git add .
           git diff-index --quiet HEAD || git commit -m "Auto update"
           git push --set-upstream origin "HEAD:master" --follow-tags --atomic
+
+      - name: Trigger fcitx5-android mod2 CI
+        run: |
+          gh workflow run ci.yml --repo fxliang/fcitx5-android --ref mod2
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+

@@ -1,0 +1,45 @@
+name: Update librime
+
+on:
+  schedule:
+    - cron: '0 22 * * *' # daily at 22:00 UTC (06:00 Beijing Time)
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check and update librime
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -e
+          # Fetch latest master in the librime submodule
+          git -C librime fetch origin master
+          NEWREV=$(git -C librime rev-parse origin/master)
+          OLDREV=$(git -C librime rev-parse HEAD)
+          if [ "$NEWREV" = "$OLDREV" ]; then
+            echo "librime is up-to-date"
+            exit 0
+          fi
+          # Update the submodule to remote tip of its configured branch
+          git submodule update --remote --checkout librime
+          git add librime
+          BRANCH=${GITHUB_REF#refs/heads/}
+          echo "Committing update on branch $BRANCH"
+          git commit -m "chore: update librime to ${NEWREV:0:7} " || echo "Nothing to commit"
+          git push origin HEAD:$BRANCH
