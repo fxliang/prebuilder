@@ -27,7 +27,7 @@ jobs:
             cmake extra-cmake-modules ninja \
             fmt boost boost-libs \
             python opencc \
-            gperf github-cli
+            gperf github-cli jq
 
       - name: Fetch source code
         uses: actions/checkout@v4
@@ -35,6 +35,7 @@ jobs:
           # this only sync submodules specified in .gitmodules,
           # because we don't want recursive submodules in glog, librime, etc.
           submodules: true
+          fetch-depth: 0
 
       - name: Fetch submodules
         run: |
@@ -42,6 +43,8 @@ jobs:
           git config --global --add safe.directory '*'
           # fetch libime submodule kenlm since it's not in .gitmodules
           git submodule update --init --recursive libime
+          # fetch tags for version derivation
+          git -C librime fetch -v --tags origin
           pushd librime-predict-leveldb
           git fetch -v origin master
           git checkout origin/master
@@ -102,8 +105,73 @@ jobs:
           git diff-index --quiet HEAD || git commit -m "Auto update"
           git push --set-upstream origin "HEAD:master" --follow-tags --atomic
 
-      - name: Trigger fcitx5-android mod2 CI
+      - name: Detect librime related changes
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        id: detect_rime_changes
         run: |
-          gh workflow run ci.yml --repo fxliang/fcitx5-android --ref mod2
-        env:
-          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          set -euo pipefail
+          BASE_SHA="${{ github.event.before }}"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA=$(git rev-parse HEAD^ 2>/dev/null || true)
+          fi
+          if [ -n "$BASE_SHA" ]; then
+            CHANGED_PATHS=$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" -- librime librime-predict-leveldb)
+          else
+            CHANGED_PATHS=$(git show --name-only --pretty="" "$GITHUB_SHA" -- librime librime-predict-leveldb)
+          fi
+          HAS_LIBRIME=false
+          HAS_PREDICT=false
+          if echo "$CHANGED_PATHS" | grep -q '^librime$'; then
+            HAS_LIBRIME=true
+          fi
+          if echo "$CHANGED_PATHS" | grep -q '^librime-predict-leveldb$'; then
+            HAS_PREDICT=true
+          fi
+          if [ "$HAS_LIBRIME" = "true" ] || [ "$HAS_PREDICT" = "true" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "has_librime=$HAS_LIBRIME" >> "$GITHUB_OUTPUT"
+          echo "has_predict=$HAS_PREDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch fxliang/fcitx5-android
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.detect_rime_changes.outputs.needs_update == 'true'
+        uses: actions/checkout@v3
+        with:
+          path: fcitx5-android
+          repository: fxliang/fcitx5-android
+          ref: mod2
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Update fxliang/fcitx5-android rime commit metadata
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.detect_rime_changes.outputs.needs_update == 'true'
+        working-directory: fcitx5-android
+        run: |
+          set -euo pipefail
+          LIBRIME_SHA=$(git -C ../librime rev-parse --short=7 HEAD)
+          LIBRIME_BASE_TAG=$(git -C ../librime describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*')
+          PREDICT_SHA=$(git -C ../librime-predict-leveldb rev-parse --short=7 HEAD)
+          if [ "${{ steps.detect_rime_changes.outputs.has_librime }}" = "true" ]; then
+            LIBRIME_JSON=plugin/rime/licenses/libraries/librime.json
+            TMP_JSON=$(mktemp)
+            jq --indent 4 --arg base "$LIBRIME_BASE_TAG" --arg sha "$LIBRIME_SHA" \
+              '.artifactVersion = ($base + "-" + $sha)' \
+              "$LIBRIME_JSON" > "$TMP_JSON"
+            mv "$TMP_JSON" "$LIBRIME_JSON"
+          fi
+          if [ "${{ steps.detect_rime_changes.outputs.has_predict }}" = "true" ]; then
+            PREDICT_JSON=plugin/rime/licenses/libraries/librime-predict-leveldb.json
+            TMP_JSON=$(mktemp)
+            jq --indent 4 --arg sha "$PREDICT_SHA" \
+              '.artifactVersion = $sha' \
+              "$PREDICT_JSON" > "$TMP_JSON"
+            mv "$TMP_JSON" "$PREDICT_JSON"
+          fi
+          git remote set-url origin "https://${{ secrets.BOT_TOKEN }}@github.com/fxliang/fcitx5-android.git"
+          git config user.name "Fcitx5 Android Bot"
+          git config user.email "102923727+fcitx5-android-bot@users.noreply.github.com"
+          git add plugin/rime/licenses/libraries/librime.json plugin/rime/licenses/libraries/librime-predict-leveldb.json
+          git diff-index --quiet HEAD || git commit -m "chore(rime): update prebuilt commit metadata"
+          git push --set-upstream origin "HEAD:mod2" --follow-tags --atomic
