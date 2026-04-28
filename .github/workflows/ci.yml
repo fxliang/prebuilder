@@ -81,7 +81,7 @@ jobs:
           path: build/prebuilt.tar.zst
 
       - name: Fetch fxliang/prebuilt
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master'
         uses: actions/checkout@v3
         with:
           path: prebuilt
@@ -90,7 +90,7 @@ jobs:
           persist-credentials: false
 
       - name: Push to fxliang/prebuilt
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master'
         working-directory: prebuilt
         run: |
           rm -r ./*
@@ -106,7 +106,7 @@ jobs:
           git push --set-upstream origin "HEAD:master" --follow-tags --atomic
 
       - name: Detect librime related changes
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master'
         id: detect_rime_changes
         run: |
           set -euo pipefail
@@ -136,7 +136,7 @@ jobs:
           echo "has_predict=$HAS_PREDICT" >> "$GITHUB_OUTPUT"
 
       - name: Fetch fxliang/fcitx5-android
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.detect_rime_changes.outputs.needs_update == 'true'
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master' && steps.detect_rime_changes.outputs.needs_update == 'true'
         uses: actions/checkout@v3
         with:
           path: fcitx5-android
@@ -146,7 +146,7 @@ jobs:
           persist-credentials: false
 
       - name: Update fxliang/fcitx5-android rime commit metadata
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.detect_rime_changes.outputs.needs_update == 'true'
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master' && steps.detect_rime_changes.outputs.needs_update == 'true'
         working-directory: fcitx5-android
         run: |
           set -euo pipefail

@@ -26,6 +26,7 @@ jobs:
       - name: Check and update librime
         env:
           GITHUB_REF: ${{ github.ref }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           set -e
           # Fetch latest master in the librime submodule
@@ -42,4 +43,6 @@ jobs:
           BRANCH=${GITHUB_REF#refs/heads/}
           echo "Committing update on branch $BRANCH"
           git commit -m "chore: update librime to ${NEWREV:0:7} " || echo "Nothing to commit"
+          # Use BOT_TOKEN so the push triggers downstream workflows (GITHUB_TOKEN pushes do not)
+          git remote set-url origin "https://${BOT_TOKEN}@github.com/${{ github.repository }}.git"
           git push origin HEAD:$BRANCH
