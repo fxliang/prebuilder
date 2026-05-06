@@ -27,7 +27,7 @@
 	fetchRecurseSubmodules = false
 [submodule "marisa-trie"]
 	path = marisa-trie
-	url = https://github.com/rime/marisa-trie
+	url = https://github.com/s-yata/marisa-trie
 [submodule "librime"]
 	path = librime
 	url = https://github.com/rime/librime
@@ -65,3 +65,6 @@
 [submodule "librime-predict-leveldb"]
 	path = librime-predict-leveldb
 	url = https://github.com/fxliang/librime-predict-leveldb
+[submodule "fmt"]
+	path = fmt
+	url = https://github.com/fmtlib/fmt.git
