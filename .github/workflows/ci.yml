@@ -59,7 +59,7 @@ jobs:
           git submodule update --init --recursive libchewing
 
       - name: Setup Android NDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           packages: "ndk;${{ env.NDK_VERSION }} cmake;${{ env.CMAKE_VERSION }}"
 
@@ -85,10 +85,10 @@ jobs:
 
       - name: Upload prebuilt to artifact
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           path: build/prebuilt.tar.zst
-          compression-level: 0
+          archive: false
 
       - name: Fetch fxliang/prebuilt
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master'
@@ -97,7 +97,7 @@ jobs:
           path: prebuilt
           repository: fxliang/prebuilt
           fetch-depth: 0
-          persist-credentials: false
+          token: ${{ secrets.BOT_TOKEN }}
 
       - name: Push to fxliang/prebuilt
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master'
@@ -108,7 +108,6 @@ jobs:
           do
             cp -a "../build/$TARGET" ./
           done
-          git remote set-url origin "https://${{ secrets.BOT_TOKEN }}@github.com/fxliang/prebuilt.git"
           git config user.name "Fcitx5 Android Bot"
           git config user.email "102923727+fcitx5-android-bot@users.noreply.github.com"
           git add .
