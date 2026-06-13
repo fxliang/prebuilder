@@ -150,7 +150,7 @@ jobs:
         with:
           path: fcitx5-android
           repository: fxliang/fcitx5-android
-          ref: mod2
+          ref: fx
           fetch-depth: 0
           persist-credentials: false
 
@@ -183,4 +183,4 @@ jobs:
           git config user.email "102923727+fcitx5-android-bot@users.noreply.github.com"
           git add plugin/rime/licenses/libraries/librime.json plugin/rime/licenses/libraries/librime-predict-leveldb.json
           git diff-index --quiet HEAD || git commit -m "chore(rime): update prebuilt commit metadata"
-          git push --set-upstream origin "HEAD:mod2" --follow-tags --atomic
+          git push --set-upstream origin "HEAD:fx" --follow-tags --atomic
