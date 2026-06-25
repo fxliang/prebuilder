@@ -24,6 +24,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Check and update librime
+        id: update
         env:
           GITHUB_REF: ${{ github.ref }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -35,6 +36,7 @@ jobs:
           OLDREV=$(git -C librime rev-parse HEAD)
           if [ "$NEWREV" = "$OLDREV" ]; then
             echo "librime is up-to-date"
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # Update the submodule to remote tip of its configured branch
@@ -46,3 +48,15 @@ jobs:
           # Use BOT_TOKEN so the push triggers downstream workflows (GITHUB_TOKEN pushes do not)
           git remote set-url origin "https://${BOT_TOKEN}@github.com/${{ github.repository }}.git"
           git push origin HEAD:$BRANCH
+          echo "has_update=true" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger CI workflow
+        if: success() && steps.update.outputs.has_update == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          curl -X POST \
+            -H "Authorization: token $BOT_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ci.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
