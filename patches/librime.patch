@@ -484,7 +484,7 @@ index c8c9e973..4a9b71e5 100644
        if (consumed == code.length()) {
          auto collector = dict_->Lookup(graph, 0);
          if (collector && !collector->empty() &&
-@@ -199,4 +291,70 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+@@ -199,4 +291,95 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
    return nullptr;
  }
  
@@ -497,45 +497,71 @@ index c8c9e973..4a9b71e5 100644
 +    return;
 +
 +  const string& input = engine_->context()->input();
-+  if (start_pos >= input.length())
++  if (start_pos >= input.length()) {
 +    return;
++  }
 +
-+  const size_t segment_start =
-+      engine_->context()->composition().GetCurrentStartPosition();
-+  if (start_pos < segment_start)
++  // Find the segment containing start_pos
++  const auto& comp = engine_->context()->composition();
++  const Segment* seg = nullptr;
++  for (const auto& s : comp) {
++    if (start_pos >= s.start && start_pos < s.end) {
++      seg = &s;
++      break;
++    }
++  }
++  if (!seg) {
 +    return;
++  }
 +
-+  string code = input.substr(start_pos);
++  // Use shadow_input to get display text (pinyin for reverse lookup)
++  string shadow = engine_->context()->shadow_input(seg->start, seg->end);
++  size_t rel_pos = start_pos - seg->start;
++
++  if (rel_pos >= shadow.length()) {
++    return;
++  }
++
++  string code = shadow.substr(rel_pos);
 +  size_t prefix_len = 0;
 +  if (!prefix_.empty()) {
-+    if (input.compare(segment_start, prefix_.length(), prefix_) != 0)
++    if (!boost::starts_with(shadow, prefix_)) {
 +      return;
-+    if (start_pos == segment_start) {
-+      code = code.substr(prefix_.length());
-+      prefix_len = prefix_.length();
-+    } else if (start_pos < segment_start + prefix_.length()) {
-+      return;
++    }
++    if (rel_pos < prefix_.length()) {
++      code = shadow.substr(prefix_.length());
++      prefix_len = prefix_.length() - rel_pos;
++    } else {
++      prefix_len = 0;
 +    }
 +  }
 +  if (!suffix_.empty() && boost::ends_with(code, suffix_)) {
 +    code.resize(code.length() - suffix_.length());
 +  }
-+  if (code.empty())
++  if (code.empty()) {
 +    return;
++  }
 +
-+  // Build SyllableGraph from the pinyin portion
++  // Build SyllableGraph from the code
 +  SyllableGraph graph;
 +  Syllabifier syllabifier("", true,
 +                          options_ ? options_->strict_spelling() : false);
 +  size_t consumed =
 +      syllabifier.BuildSyllableGraph(code, *dict_->prism(), &graph);
-+  if (consumed == 0)
++  if (consumed == 0) {
 +    return;
++  }
++
++  // Apply tab constraints to filter the graph (same as Query)
++  ApplyTabConstraints(&graph, dict_.get(),
++                      engine_->context()->tab_constraints(), seg->start,
++                      seg->end, rel_pos + prefix_len);
 +
 +  // Collect edges from position 0
 +  auto it = graph.edges.find(0);
-+  if (it == graph.edges.end())
++  if (it == graph.edges.end()) {
 +    return;
++  }
 +  set<string> seen;
 +  for (const auto& [end_pos, syllable_map] : it->second) {
 +    for (const auto& [syllable_id, props] : syllable_map) {
@@ -545,7 +571,6 @@ index c8c9e973..4a9b71e5 100644
 +      if (dict_->Decode(single_code, &decoded) && !decoded.empty()) {
 +        const string& label = decoded[0];
 +        if (!label.empty() && seen.insert(label).second) {
-+          // span includes the prefix length
 +          tabs->emplace_back(InputTabEntry{label, prefix_len + end_pos,
 +                                           InputTabEntry::kReverseLookup});
 +        }
@@ -1523,7 +1548,7 @@ index 30f4514f..4a2784f7 100644
  
  using namespace rime;
  
-@@ -1129,6 +1133,208 @@ void RimeGetStagingDirSecure(char* dir, size_t buffer_size);
+@@ -1129,6 +1133,225 @@ void RimeGetStagingDirSecure(char* dir, size_t buffer_size);
  void RimeGetSyncDirSecure(char* dir, size_t buffer_size);
  const char* RimeGetVersion();
  
@@ -1547,6 +1572,13 @@ index 30f4514f..4a2784f7 100644
 +
 +  // Use provided position; 0 means "current cursor"
 +  size_t start_pos = (position == 0) ? ctx->CurrentTabCursor() : position;
++  // When auto-detecting position (position == 0), skip past confirmed segments
++  if (position == 0) {
++    size_t edit_pos = ctx->composition().GetCurrentStartPosition();
++    if (start_pos < edit_pos) {
++      start_pos = edit_pos;
++    }
++  }
 +  if (start_pos >= ctx->input().length()) {
 +    if (position == 0) {
 +      // Auto-computed position past input: all syllables selected, no tabs
@@ -1707,9 +1739,19 @@ index 30f4514f..4a2784f7 100644
 +  if (!ctx)
 +    return False;
 +
-+  // position=0 means auto-compute from current tree cursor
++  // position=0 means auto-compute from current editing segment.
++  // Keep this aligned with RimeGetInputTabs(position=0), otherwise a tab that
++  // is shown to user may be applied to a stale cursor position.
 +  if (position == 0) {
 +    position = ctx->CurrentTabCursor();
++    size_t edit_pos = ctx->composition().GetCurrentStartPosition();
++    if (position < edit_pos) {
++      position = edit_pos;
++    }
++  }
++
++  if (position >= ctx->input().length()) {
++    return False;
 +  }
 +
 +  ctx->PushTabCursor(position + span);
