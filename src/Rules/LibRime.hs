@@ -43,9 +43,11 @@ librimeRule = do
             cmd_ (Cwd librimePredictSrc) "git checkout ."
             cmd_ (Cwd librimePredictSrc) "git submodule update --init --recursive -v"
             cmd_ (Cwd librimePredictSrc) "git apply ../patches/librime-predict.patch"
-            -- remove absolute path by __FILE__ macro
+            -- remove absolute path by __FILE__ macro; tabs selectable; refactor tabs
             cmd_ (Cwd src) "git checkout ."
-            cmd_ (Cwd src) "git apply ../patches/librime.patch",
+            cmd_ (Cwd src) "git apply ../patches/librime.patch"
+            -- in-memory sorted cache for user dictionary queries
+            cmd_ (Cwd src) "git apply ../patches/librime-userdict-cache.patch",
           cmakeFlags = \BuildEnv {..} ->
             [ "-DBUILD_SHARED_LIBS=OFF",
               "-DBUILD_STATIC=ON",

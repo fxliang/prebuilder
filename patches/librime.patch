@@ -1,114 +1,1750 @@
-diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 8faa61f8..671622ce 100644
---- a/src/CMakeLists.txt
-+++ b/src/CMakeLists.txt
-@@ -166,6 +166,8 @@ if(BUILD_SHARED_LIBS)
- else()
-   add_library(rime-static STATIC ${rime_src})
-   target_link_libraries(rime-static ${rime_deps})
-+  target_compile_options(rime-static PRIVATE "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
-+  target_compile_definitions(rime-static PRIVATE BOOST_DISABLE_CURRENT_LOCATION BOOST_ALL_NO_EMBEDDED_GDB_SCRIPTS)
-   set_target_properties(rime-static PROPERTIES
-     OUTPUT_NAME "rime" PREFIX "lib"
-     ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+diff --git a/src/rime/context.cc b/src/rime/context.cc
+index ec840a3e..9ac75f0b 100644
+--- a/src/rime/context.cc
++++ b/src/rime/context.cc
+@@ -70,6 +70,8 @@ bool Context::PushInput(char ch) {
+     input_.insert(caret_pos_, 1, ch);
+     ++caret_pos_;
+   }
++  tab_cursors_.clear();
++  tab_constraints_.clear();
+   update_notifier_(this);
+   return true;
+ }
+@@ -82,11 +84,26 @@ bool Context::PushInput(const string& str) {
+     input_.insert(caret_pos_, str);
+     caret_pos_ += str.length();
+   }
++  tab_cursors_.clear();
++  tab_constraints_.clear();
+   update_notifier_(this);
+   return true;
+ }
+ 
+ bool Context::PopInput(size_t len) {
++  size_t undone = 0;
++  while (undone < len && (!tab_cursors_.empty() || !tab_constraints_.empty())) {
++    if (!tab_cursors_.empty()) {
++      PopTabCursor();
++    }
++    if (!tab_constraints_.empty()) {
++      UndoLastTabConstraint();
++    }
++    ++undone;
++  }
++  if (undone > 0)
++    return true;
++  // Normal pop
+   if (caret_pos_ < len)
+     return false;
+   caret_pos_ -= len;
+@@ -99,6 +116,8 @@ bool Context::DeleteInput(size_t len) {
+   if (caret_pos_ + len > input_.length())
+     return false;
+   input_.erase(caret_pos_, len);
++  tab_cursors_.clear();
++  tab_constraints_.clear();
+   update_notifier_(this);
+   return true;
+ }
+@@ -107,6 +126,8 @@ void Context::Clear() {
+   input_.clear();
+   caret_pos_ = 0;
+   composition_.clear();
++  tab_cursors_.clear();
++  tab_constraints_.clear();
+   update_notifier_(this);
+ }
+ 
+@@ -280,9 +301,31 @@ void Context::set_composition(Composition&& comp) {
+ void Context::set_input(const string& value) {
+   input_ = value;
+   caret_pos_ = input_.length();
++  tab_cursors_.clear();
++  tab_constraints_.clear();
+   update_notifier_(this);
+ }
+ 
++string Context::shadow_input() const {
++  return shadow_input(0, input_.length());
++}
++
++string Context::shadow_input(size_t start, size_t end) const {
++  start = (std::min)(start, input_.length());
++  end = (std::min)((std::max)(start, end), input_.length());
++  string shadow;
++  size_t raw_pos = start;
++  for (const auto& constraint : tab_constraints_) {
++    if (constraint.position < raw_pos || constraint.position >= end)
++      continue;
++    shadow.append(input_, raw_pos, constraint.position - raw_pos);
++    shadow += constraint.label;
++    raw_pos = (std::min)(constraint.position + constraint.span, end);
++  }
++  shadow.append(input_, raw_pos, end - raw_pos);
++  return shadow;
++}
++
+ void Context::set_option(const string& name, bool value) {
+   options_[name] = value;
+   DLOG(INFO) << "Context::set_option " << name << " = " << value;
+@@ -324,4 +367,55 @@ void Context::ClearTransientOptions() {
+   }
+ }
+ 
++void Context::AddTabConstraint(size_t position,
++                               const string& label,
++                               size_t span) {
++  tab_constraints_.push_back({position, label, span});
++  RefreshNonConfirmedComposition();
++}
++
++void Context::ClearTabConstraints() {
++  if (!tab_cursors_.empty() || !tab_constraints_.empty()) {
++    tab_cursors_.clear();
++    tab_constraints_.clear();
++    RefreshNonConfirmedComposition();
++  }
++}
++
++size_t Context::NextTabPosition() const {
++  if (!tab_cursors_.empty())
++    return tab_cursors_.back();
++  size_t pos = 0;
++  for (const auto& c : tab_constraints_) {
++    size_t next = c.position + c.span;
++    if (next > pos)
++      pos = next;
++  }
++  return pos;
++}
++
++void Context::PushTabCursor(size_t position) {
++  tab_cursors_.push_back(position);
++}
++
++void Context::PopTabCursor() {
++  if (!tab_cursors_.empty())
++    tab_cursors_.pop_back();
++}
++
++void Context::ClearTabCursors() {
++  tab_cursors_.clear();
++}
++
++size_t Context::CurrentTabCursor() const {
++  return tab_cursors_.empty() ? 0 : tab_cursors_.back();
++}
++
++void Context::UndoLastTabConstraint() {
++  if (tab_constraints_.empty())
++    return;
++  tab_constraints_.pop_back();
++  RefreshNonConfirmedComposition();
++}
++
+ }  // namespace rime
+diff --git a/src/rime/context.h b/src/rime/context.h
+index d5261300..745ddeb4 100644
+--- a/src/rime/context.h
++++ b/src/rime/context.h
+@@ -62,6 +62,8 @@ class RIME_DLL Context {
+ 
+   void set_input(const string& value);
+   const string& input() const { return input_; }
++  string shadow_input() const;
++  string shadow_input(size_t start, size_t end) const;
+ 
+   void set_caret_pos(size_t caret_pos);
+   size_t caret_pos() const { return caret_pos_; }
+@@ -95,6 +97,24 @@ class RIME_DLL Context {
+   }
+   KeyEventNotifier& unhandled_key_notifier() { return unhandled_key_notifier_; }
+ 
++  // Tab constraint for syllable disambiguation (简拼/T9)
++  struct TabConstraint {
++    size_t position;  // input position where constraint applies
++    string label;     // selected tab label (e.g., "n", "cè")
++    size_t span;      // how many input chars this constraint consumes
++  };
++  const vector<TabConstraint>& tab_constraints() const {
++    return tab_constraints_;
++  }
++  size_t NextTabPosition() const;
++  void PushTabCursor(size_t position);
++  void PopTabCursor();
++  void ClearTabCursors();
++  size_t CurrentTabCursor() const;
++  void AddTabConstraint(size_t position, const string& label, size_t span);
++  void ClearTabConstraints();
++  void UndoLastTabConstraint();
++
+  private:
+   string GetSoftCursor() const;
+ 
+@@ -104,6 +124,8 @@ class RIME_DLL Context {
+   CommitHistory commit_history_;
+   map<string, bool> options_;
+   map<string, string> properties_;
++  vector<size_t> tab_cursors_;
++  vector<TabConstraint> tab_constraints_;
+ 
+   Notifier commit_notifier_;
+   Notifier select_notifier_;
 diff --git a/src/rime/engine.cc b/src/rime/engine.cc
-index 4a54f64c..2efe0c93 100644
+index 4a54f64c..e073eabf 100644
 --- a/src/rime/engine.cc
 +++ b/src/rime/engine.cc
-@@ -52,7 +52,6 @@ class ConcreteEngine : public Engine {
-   vector<of<Filter>> filters_;
-   vector<of<Formatter>> formatters_;
-   vector<of<Processor>> post_processors_;
--  an<Switcher> switcher_;
- };
+@@ -8,6 +8,7 @@
+ #include <rime/common.h>
+ #include <rime/composition.h>
+ #include <rime/context.h>
++#include <rime/dict/dictionary.h>
+ #include <rime/engine.h>
+ #include <rime/filter.h>
+ #include <rime/formatter.h>
+@@ -33,6 +34,51 @@ class ConcreteEngine : public Engine {
+   virtual void ApplySchema(Schema* schema);
+   virtual void CommitText(string text);
+   virtual void Compose(Context* ctx);
++  bool IsReverseLookupSegment(const Segment& segment) const {
++    for (const auto& translator : translators_) {
++      if (translator->IsReverseLookupSegment(segment))
++        return true;
++    }
++    return false;
++  }
++  virtual void CollectInputTabs(size_t pos, vector<InputTabEntry>* tabs) const {
++    bool reverse_lookup = false;
++    const Segment* active_segment = nullptr;
++    for (const Segment& segment : context_->composition()) {
++      if (pos >= segment.start && pos < segment.end) {
++        active_segment = &segment;
++        reverse_lookup = IsReverseLookupSegment(segment);
++        break;
++      }
++    }
++    for (auto& t : translators_) {
++      if (reverse_lookup && !t->IsReverseLookupSegment(*active_segment))
++        continue;
++      t->CollectInputTabs(pos, tabs);
++    }
++  }
++  virtual bool IsReverseLookupPosition(size_t pos) const {
++    for (const Segment& segment : context_->composition()) {
++      if (pos < segment.start || pos >= segment.end)
++        continue;
++      return IsReverseLookupSegment(segment);
++    }
++    return false;
++  }
++  virtual Dictionary* primary_dictionary() const {
++    for (auto& t : translators_) {
++      if (auto* d = t->primary_dictionary(); d && d->loaded())
++        return d;
++    }
++    return nullptr;
++  }
++  virtual void GetReverseLookupPrefixes(vector<string>* prefixes) const {
++    for (auto& t : translators_) {
++      string pfx = t->reverse_lookup_prefix();
++      if (!pfx.empty())
++        prefixes->push_back(pfx);
++    }
++  }
  
- // implementations
+  protected:
+   void InitializeComponents();
+@@ -210,8 +256,12 @@ void ConcreteEngine::TranslateSegments(Segmentation* segments) {
+     size_t len = segment.end - segment.start;
+     string input = segments->input().substr(segment.start, len);
+     DLOG(INFO) << "translating segment: [" << input << "]";
++
+     auto menu = New<Menu>();
++    const bool reverse_lookup = IsReverseLookupSegment(segment);
+     for (auto& translator : translators_) {
++      if (reverse_lookup && !translator->IsReverseLookupSegment(segment))
++        continue;
+       auto translation = translator->Query(input, segment);
+       if (!translation)
+         continue;
 diff --git a/src/rime/engine.h b/src/rime/engine.h
-index 6b51a68e..c5b8f7e4 100644
+index 6b51a68e..cfdf537a 100644
 --- a/src/rime/engine.h
 +++ b/src/rime/engine.h
-@@ -16,6 +16,7 @@ namespace rime {
+@@ -10,12 +10,14 @@
+ #include <rime_api.h>
+ #include <rime/common.h>
+ #include <rime/messenger.h>
++#include <rime/translator.h>
+ 
+ namespace rime {
+ 
  class KeyEvent;
  class Schema;
  class Context;
-+class Switcher;
++class Dictionary;
  
  class Engine : public Messenger {
   public:
-@@ -35,6 +36,7 @@ class Engine : public Messenger {
-   void set_active_engine(Engine* engine = nullptr) { active_engine_ = engine; }
+@@ -27,6 +29,16 @@ class Engine : public Messenger {
+   virtual void CommitText(string text) { sink_(text); }
+   virtual void Compose(Context* ctx) {}
  
-   RIME_DLL static Engine* Create();
-+  an<Switcher> switcher_;
- 
-  protected:
-   Engine();
-diff --git a/src/rime/lever/deployment_tasks.cc b/src/rime/lever/deployment_tasks.cc
-index 6e6ff895..fe111d55 100644
---- a/src/rime/lever/deployment_tasks.cc
-+++ b/src/rime/lever/deployment_tasks.cc
-@@ -429,17 +429,6 @@ static bool ConfigNeedsUpdate(Config* config) {
++  //! Access input tab entries from the translator collection.
++  virtual void CollectInputTabs(size_t position,
++                                vector<InputTabEntry>* tabs) const {}
++  //! Return whether the input position belongs to a reverse lookup segment.
++  virtual bool IsReverseLookupPosition(size_t position) const { return false; }
++  //! Get the first available translatordictionary for code lookup.
++  virtual Dictionary* primary_dictionary() const { return nullptr; }
++  //! Collect reverse lookup prefixes from all translators.
++  virtual void GetReverseLookupPrefixes(vector<string>* prefixes) const {}
++
+   Schema* schema() const { return schema_.get(); }
+   Context* context() const { return context_.get(); }
+   CommitSink& sink() { return sink_; }
+diff --git a/src/rime/gear/editor.cc b/src/rime/gear/editor.cc
+index 37b3dda6..f512da82 100644
+--- a/src/rime/gear/editor.cc
++++ b/src/rime/gear/editor.cc
+@@ -125,8 +125,13 @@ bool Editor::CommitComposition(Context* ctx) {
+ bool Editor::RevertLastEdit(Context* ctx) {
+   // revert last selection or delete last input character
+   // depending on recent operation type
+-  ctx->ReopenPreviousSelection() ||
+-      (ctx->PopInput() && ctx->ReopenPreviousSegment());
++  if (!ctx->tab_constraints().empty()) {
++    ctx->PopInput();
++    ctx->ReopenPreviousSegment();
++  } else {
++    ctx->ReopenPreviousSelection() ||
++        (ctx->PopInput() && ctx->ReopenPreviousSegment());
++  }
+   return true;
  }
  
- bool ConfigFileUpdate::Run(Deployer* deployer) {
--  const path shared_data_path(deployer->shared_data_dir);
--  const path user_data_path(deployer->user_data_dir);
--  // trash deprecated user copy created by an older version of Rime
--  path source_config_path(shared_data_path / file_name_);
--  path dest_config_path(user_data_path / file_name_);
--  path trash = user_data_path / "trash";
--  if (TrashDeprecatedUserCopy(source_config_path, dest_config_path,
--                              version_key_, trash)) {
--    LOG(WARNING) << "deprecated user copy of '" << file_name_
--                 << "' is moved to " << trash;
--  }
-   // build the config file if needs update
-   the<Config> config(Config::Require("config")->Create(file_name_));
-   if (ConfigNeedsUpdate(config.get())) {
+diff --git a/src/rime/gear/reverse_lookup_translator.cc b/src/rime/gear/reverse_lookup_translator.cc
+index c8c9e973..4a9b71e5 100644
+--- a/src/rime/gear/reverse_lookup_translator.cc
++++ b/src/rime/gear/reverse_lookup_translator.cc
+@@ -6,6 +6,7 @@
+ //
+ #include <boost/algorithm/string.hpp>
+ #include <rime/candidate.h>
++#include <rime/context.h>
+ #include <rime/engine.h>
+ #include <rime/schema.h>
+ #include <rime/segmentation.h>
+@@ -24,6 +25,86 @@
+ 
+ namespace rime {
+ 
++namespace {
++
++void ApplyTabConstraints(SyllableGraph* graph,
++                         Dictionary* dict,
++                         const vector<Context::TabConstraint>& constraints,
++                         size_t segment_start,
++                         size_t segment_end,
++                         size_t code_start) {
++  bool changed = false;
++  size_t raw_pos = segment_start;
++  size_t shadow_pos = 0;
++  for (const auto& constraint : constraints) {
++    if (constraint.position < raw_pos)
++      continue;
++    if (constraint.position >= segment_end)
++      break;
++
++    shadow_pos += constraint.position - raw_pos;
++    raw_pos = (std::min)(constraint.position + constraint.span, segment_end);
++
++    if (shadow_pos < code_start) {
++      shadow_pos += constraint.label.length();
++      continue;
++    }
++    const size_t graph_pos = shadow_pos - code_start;
++    const size_t span = constraint.label.length();
++    shadow_pos += span;
++    if (graph_pos >= graph->input_length || span == 0)
++      continue;
++
++    auto edge_it = graph->edges.find(graph_pos);
++    if (edge_it == graph->edges.end())
++      continue;
++
++    const string label = StripTones(constraint.label);
++    auto& end_map = edge_it->second;
++    for (auto end_it = end_map.begin(); end_it != end_map.end();) {
++      if (end_it->first != graph_pos + span) {
++        end_it = end_map.erase(end_it);
++        changed = true;
++        continue;
++      }
++      auto& spelling_map = end_it->second;
++      for (auto spelling_it = spelling_map.begin();
++           spelling_it != spelling_map.end();) {
++        Code code;
++        code.push_back(spelling_it->first);
++        vector<string> decoded;
++        if (dict->Decode(code, &decoded) && !decoded.empty() &&
++            StripTones(decoded[0]) == label) {
++          ++spelling_it;
++        } else {
++          spelling_it = spelling_map.erase(spelling_it);
++          changed = true;
++        }
++      }
++      if (spelling_map.empty()) {
++        end_it = end_map.erase(end_it);
++        changed = true;
++      } else {
++        ++end_it;
++      }
++    }
++  }
++
++  if (!changed)
++    return;
++  graph->indices.clear();
++  for (const auto& [start, end_map] : graph->edges) {
++    auto& index = graph->indices[start];
++    for (const auto& [end, spelling_map] : end_map) {
++      for (const auto& [syllable_id, properties] : spelling_map) {
++        index[syllable_id].push_back(&properties);
++      }
++    }
++  }
++}
++
++}  // namespace
++
+ class ReverseLookupTranslation : public TableTranslation {
+  public:
+   ReverseLookupTranslation(ReverseLookupDictionary* dict,
+@@ -36,6 +117,7 @@ class ReverseLookupTranslation : public TableTranslation {
+                            bool quality)
+       : TableTranslation(options,
+                          NULL,
++                         nullptr,
+                          input,
+                          start,
+                          end,
+@@ -100,6 +182,11 @@ ReverseLookupTranslator::ReverseLookupTranslator(const Ticket& ticket)
+   config->GetString(name_space_ + "/tag", &tag_);
+ }
+ 
++bool ReverseLookupTranslator::IsReverseLookupSegment(
++    const Segment& segment) const {
++  return segment.HasTag(tag_);
++}
++
+ void ReverseLookupTranslator::Initialize() {
+   initialized_ = true;  // no retry
+   if (!engine_)
+@@ -148,16 +235,18 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+     Initialize();  // load reverse dict at first use
+   if (!dict_ || !dict_->loaded())
+     return nullptr;
+-  DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
++  const string shadow_input =
++      engine_->context()->shadow_input(segment.start, segment.end);
++  DLOG(INFO) << "input = '" << shadow_input << "', [" << segment.start << ", "
+              << segment.end << ")";
+ 
+   const string& preedit(input);
+ 
+   size_t start = 0;
+-  if (!prefix_.empty() && boost::starts_with(input, prefix_)) {
++  if (!prefix_.empty() && boost::starts_with(shadow_input, prefix_)) {
+     start = prefix_.length();
+   }
+-  string code = input.substr(start);
++  string code = shadow_input.substr(start);
+   if (!suffix_.empty() && boost::ends_with(code, suffix_)) {
+     code.resize(code.length() - suffix_.length());
+   }
+@@ -170,7 +259,7 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+ 
+   DictEntryIterator iter;
+   bool quality = false;
+-  if (start < input.length()) {
++  if (start < shadow_input.length()) {
+     if (options_ && options_->enable_completion()) {
+       dict_->LookupWords(&iter, code, true, 100, nullptr);
+       quality = !iter.exhausted() && (iter.Peek()->remaining_code_length == 0);
+@@ -180,6 +269,9 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+       Syllabifier syllabifier("", true, options_->strict_spelling());
+       size_t consumed =
+           syllabifier.BuildSyllableGraph(code, *dict_->prism(), &graph);
++      ApplyTabConstraints(&graph, dict_.get(),
++                          engine_->context()->tab_constraints(), segment.start,
++                          segment.end, start);
+       if (consumed == code.length()) {
+         auto collector = dict_->Lookup(graph, 0);
+         if (collector && !collector->empty() &&
+@@ -199,4 +291,70 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+   return nullptr;
+ }
+ 
++void ReverseLookupTranslator::CollectReverseLookupTabs(
++    size_t start_pos,
++    vector<InputTabEntry>* tabs) const {
++  if (!initialized_)
++    const_cast<ReverseLookupTranslator*>(this)->Initialize();
++  if (!dict_ || !dict_->loaded() || !engine_ || !engine_->context())
++    return;
++
++  const string& input = engine_->context()->input();
++  if (start_pos >= input.length())
++    return;
++
++  const size_t segment_start =
++      engine_->context()->composition().GetCurrentStartPosition();
++  if (start_pos < segment_start)
++    return;
++
++  string code = input.substr(start_pos);
++  size_t prefix_len = 0;
++  if (!prefix_.empty()) {
++    if (input.compare(segment_start, prefix_.length(), prefix_) != 0)
++      return;
++    if (start_pos == segment_start) {
++      code = code.substr(prefix_.length());
++      prefix_len = prefix_.length();
++    } else if (start_pos < segment_start + prefix_.length()) {
++      return;
++    }
++  }
++  if (!suffix_.empty() && boost::ends_with(code, suffix_)) {
++    code.resize(code.length() - suffix_.length());
++  }
++  if (code.empty())
++    return;
++
++  // Build SyllableGraph from the pinyin portion
++  SyllableGraph graph;
++  Syllabifier syllabifier("", true,
++                          options_ ? options_->strict_spelling() : false);
++  size_t consumed =
++      syllabifier.BuildSyllableGraph(code, *dict_->prism(), &graph);
++  if (consumed == 0)
++    return;
++
++  // Collect edges from position 0
++  auto it = graph.edges.find(0);
++  if (it == graph.edges.end())
++    return;
++  set<string> seen;
++  for (const auto& [end_pos, syllable_map] : it->second) {
++    for (const auto& [syllable_id, props] : syllable_map) {
++      Code single_code;
++      single_code.push_back(syllable_id);
++      vector<string> decoded;
++      if (dict_->Decode(single_code, &decoded) && !decoded.empty()) {
++        const string& label = decoded[0];
++        if (!label.empty() && seen.insert(label).second) {
++          // span includes the prefix length
++          tabs->emplace_back(InputTabEntry{label, prefix_len + end_pos,
++                                           InputTabEntry::kReverseLookup});
++        }
++      }
++    }
++  }
++}
++
+ }  // namespace rime
+diff --git a/src/rime/gear/reverse_lookup_translator.h b/src/rime/gear/reverse_lookup_translator.h
+index 7ca038f6..69b4185e 100644
+--- a/src/rime/gear/reverse_lookup_translator.h
++++ b/src/rime/gear/reverse_lookup_translator.h
+@@ -10,6 +10,7 @@
+ #include <rime/common.h>
+ #include <rime/translator.h>
+ #include <rime/algo/algebra.h>
++#include <rime/algo/syllabifier.h>
+ 
+ namespace rime {
+ 
+@@ -23,6 +24,27 @@ class ReverseLookupTranslator : public Translator {
+ 
+   virtual an<Translation> Query(const string& input, const Segment& segment);
+ 
++  //! Get the configured reverse lookup prefix (e.g. "z")
++  //! Triggers lazy initialization if not yet done.
++  RIME_DLL string reverse_lookup_prefix() const {
++    if (!initialized_)
++      const_cast<ReverseLookupTranslator*>(this)->Initialize();
++    return prefix_;
++  }
++
++  //! Return the primary dictionary for code lookup (override).
++  Dictionary* primary_dictionary() const override { return dict(); }
++
++  //! Collect possible tab entries from the reverse lookup SyllableGraph
++  RIME_DLL void CollectReverseLookupTabs(size_t start_pos,
++                                         vector<InputTabEntry>* tabs) const;
++
++  void CollectInputTabs(size_t position,
++                        vector<InputTabEntry>* tabs) const override {
++    CollectReverseLookupTabs(position, tabs);
++  }
++  bool IsReverseLookupSegment(const Segment& segment) const override;
++
+  protected:
+   void Initialize();
+ 
+@@ -34,6 +56,13 @@ class ReverseLookupTranslator : public Translator {
+   string prefix_;
+   string suffix_;
+   string tips_;
++
++  // expose dict() for virtual override
++  Dictionary* dict() const {
++    if (!initialized_)
++      const_cast<ReverseLookupTranslator*>(this)->Initialize();
++    return dict_.get();
++  }
+ };
+ 
+ }  // namespace rime
+diff --git a/src/rime/gear/script_translator.cc b/src/rime/gear/script_translator.cc
+index aef62178..a134d371 100644
+--- a/src/rime/gear/script_translator.cc
++++ b/src/rime/gear/script_translator.cc
+@@ -94,6 +94,8 @@ class ScriptSyllabifier : public PhraseSyllabifier {
+ 
+   virtual Spans Syllabify(const Phrase* phrase);
+   size_t BuildSyllableGraph(Prism& prism);
++  void ApplyTabConstraints(Dictionary* dict,
++                           const vector<Context::TabConstraint>& constraints);
+   string GetPreeditString(const Phrase& cand) const;
+   string GetOriginalSpelling(const Phrase& cand) const;
+   bool IsCorrection(const Code& code, size_t code_length) const;
+@@ -204,14 +206,68 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
+   }
+ }
+ 
++ConstraintFilteredTranslation::ConstraintFilteredTranslation(
++    an<Translation> translation,
++    Dictionary* dict,
++    const vector<Context::TabConstraint>& constraints)
++    : CacheTranslation(translation), dict_(dict), constraints_(constraints) {
++  if (!exhausted() && Peek() && !MatchesConstraints(Peek())) {
++    Next();
++  }
++}
++
++bool ConstraintFilteredTranslation::Next() {
++  if (exhausted())
++    return false;
++  do {
++    CacheTranslation::Next();
++  } while (!exhausted() && Peek() && !MatchesConstraints(Peek()));
++  return !exhausted();
++}
++
++bool ConstraintFilteredTranslation::MatchesConstraints(
++    const an<Candidate>& candidate) {
++  if (constraints_.empty())
++    return true;
++
++  auto phrase = As<Phrase>(Candidate::GetGenuineCandidate(candidate));
++  if (!phrase)
++    return false;
++
++  vector<string> decoded;
++  if (!dict_ || !dict_->Decode(phrase->code(), &decoded) || decoded.empty())
++    return true;
++
++  size_t syllable_index = 0;
++  for (const auto& constraint : constraints_) {
++    if (syllable_index >= decoded.size())
++      return false;
++    const string syllable = StripTones(decoded[syllable_index++]);
++    const string label = StripTones(constraint.label);
++    if (syllable.empty() || label.empty())
++      return false;
++    if (constraint.span == 1) {
++      if (std::tolower(static_cast<unsigned char>(syllable[0])) !=
++          std::tolower(static_cast<unsigned char>(label[0]))) {
++        return false;
++      }
++    } else if (syllable != label) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ an<Translation> ScriptTranslator::Query(const string& input,
+                                         const Segment& segment) {
+   if (!dict_ || !dict_->loaded())
+     return nullptr;
+   if (!segment.HasAnyTagIn(tags_))
+     return nullptr;
+-  DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
+-             << segment.end << ")";
++  const string shadow_input =
++      engine_->context()->shadow_input(segment.start, segment.end);
++  DLOG(INFO) << "ScriptTranslator::Query input='" << shadow_input << "' ["
++             << segment.start << ", " << segment.end << ")";
+ 
+   FinishSession();
+ 
+@@ -221,13 +277,18 @@ an<Translation> ScriptTranslator::Query(const string& input,
+   size_t end_of_input = engine_->context()->input().length();
+   // the translator should survive translations it creates
+   auto result = New<ScriptTranslation>(
+-      this, corrector_.get(), poet_.get(), input, segment.start, end_of_input,
+-      max_sentences_, sentence_cutoff_threshold_);
++      this, corrector_.get(), poet_.get(), shadow_input, segment.start,
++      end_of_input, max_sentences_, sentence_cutoff_threshold_);
+   if (!result || !result->Evaluate(
+                      dict_.get(), enable_user_dict ? user_dict_.get() : NULL)) {
+     return nullptr;
+   }
+-  auto deduped = New<DistinctTranslation>(result);
++  an<Translation> deduped = New<DistinctTranslation>(result);
++  const auto& constraints = engine_->context()->tab_constraints();
++  if (!constraints.empty()) {
++    deduped =
++        New<ConstraintFilteredTranslation>(deduped, dict_.get(), constraints);
++  }
+   if (contextual_suggestions_) {
+     return poet_->ContextualWeighted(deduped, input, segment.start, this);
+   }
+@@ -347,6 +408,97 @@ bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
+   return true;
+ }
+ 
++static string NormalizeTabLabel(const string& label) {
++  string normalized = StripTones(label);
++  for (char& ch : normalized) {
++    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
++  }
++  return normalized;
++}
++
++void ScriptTranslator::CollectSyllableTabs(size_t start_pos,
++                                           vector<InputTabEntry>* tabs) const {
++  if (!dict_ || !dict_->loaded() || !engine_ || !engine_->context())
++    return;
++
++  const string& input = engine_->context()->input();
++  if (start_pos >= input.length())
++    return;
++
++  // Build and prune the full graph against the current tab constraints, then
++  // inspect the node at start_pos. This keeps tree navigation aligned with the
++  // active selection path instead of exposing the raw unfiltered graph.
++  ScriptSyllabifier syllabifier(const_cast<ScriptTranslator*>(this),
++                                corrector_.get(), input, 0);
++  syllabifier.BuildSyllableGraph(*dict_->prism());
++  if (auto* ctx = engine_->context()) {
++    const auto& constraints = ctx->tab_constraints();
++    if (!constraints.empty()) {
++      syllabifier.ApplyTabConstraints(dict_.get(), constraints);
++    }
++  }
++  const auto& graph = syllabifier.syllable_graph();
++
++  // Parse xlit algebra rules to build reverse mapping: target_char →
++  // source_chars E.g.
++  // xlit/ABCDEFGHIJKLMNOPQRSTUVWXYZ/22233344455566677778889999/
++  //   → '6' maps to {m, n, o}
++  map<char, set<char>> xlit_reverse;
++  if (engine_ && engine_->schema() && engine_->schema()->config()) {
++    xlit_reverse = ParseAlgebraReverseMapping(engine_->schema()->config());
++  }
++
++  // Check if the input character at start_pos has an xlit/derive mapping
++  char first_input_char = input[start_pos];
++  bool first_char_has_xlit = xlit_reverse.count(first_input_char) > 0;
++
++  map<string, size_t> seen;
++  bool has_single_span = false;
++  auto it = graph.edges.find(start_pos);
++  if (it != graph.edges.end()) {
++    for (const auto& [end_pos, syllable_map] : it->second) {
++      if (end_pos == start_pos + 1) {
++        has_single_span = true;
++        if (first_char_has_xlit)
++          continue;  // Skip span=1 noise when mapping applies
++      }
++      for (const auto& [syllable_id, props] : syllable_map) {
++        Code single_code;
++        single_code.push_back(syllable_id);
++        vector<string> decoded;
++        if (dict_->Decode(single_code, &decoded) && !decoded.empty()) {
++          string label = NormalizeTabLabel(decoded[0]);
++          if (!label.empty()) {
++            size_t span = end_pos - start_pos;
++            auto [it, inserted] = seen.emplace(label, tabs->size());
++            if (inserted) {
++              tabs->emplace_back(
++                  InputTabEntry{label, span, InputTabEntry::kSyllable});
++            } else if (span > (*tabs)[it->second].span) {
++              (*tabs)[it->second].span = span;
++            }
++          }
++        }
++      }
++    }
++  }
++
++  // Generate xlit partial-match tabs for 简拼 disambiguation
++  if ((!has_single_span || first_char_has_xlit) && first_char_has_xlit) {
++    auto xlit_it = xlit_reverse.find(first_input_char);
++    if (xlit_it != xlit_reverse.end()) {
++      for (char letter : xlit_it->second) {
++        string label(1, static_cast<char>(
++                            std::tolower(static_cast<unsigned char>(letter))));
++        tabs->emplace_back(InputTabEntry{label, 1, InputTabEntry::kSyllable});
++      }
++      string first_char(1, first_input_char);
++      tabs->emplace_back(
++          InputTabEntry{first_char, 1, InputTabEntry::kRawInput});
++    }
++  }
++}
++
+ // ScriptSyllabifier implementation
+ 
+ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
+@@ -369,6 +521,128 @@ size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
+                                                  &syllable_graph_);
+ }
+ 
++// Helper: decode a single SyllableId to string
++static string DecodeSyllableId(Dictionary* dict, SyllableId id) {
++  if (!dict)
++    return "";
++  Code code;
++  code.push_back(id);
++  vector<string> decoded;
++  if (dict->Decode(code, &decoded) && !decoded.empty())
++    return decoded[0];
++  return "";
++}
++
++void ScriptSyllabifier::ApplyTabConstraints(
++    Dictionary* dict,
++    const vector<Context::TabConstraint>& constraints) {
++  if (constraints.empty())
++    return;
++  DLOG(INFO) << "ApplyTabConstraints: " << constraints.size()
++             << " constraints, start_=" << start_
++             << " input_length=" << syllable_graph_.input_length;
++
++  for (const auto& constraint : constraints) {
++    if (constraint.position < start_)
++      continue;
++    size_t graph_pos = constraint.position - start_;
++    DLOG(INFO) << "  constraint: pos=" << constraint.position
++               << " graph_pos=" << graph_pos << " label=[" << constraint.label
++               << "]"
++               << " span=" << constraint.span;
++    if (graph_pos >= syllable_graph_.input_length) {
++      DLOG(INFO) << "  SKIP: graph_pos >= input_length";
++      continue;
++    }
++
++    auto edge_it = syllable_graph_.edges.find(graph_pos);
++    if (edge_it == syllable_graph_.edges.end()) {
++      DLOG(INFO) << "  SKIP: no edges at graph_pos=" << graph_pos;
++      continue;
++    }
++
++    string label_base = StripTones(constraint.label);
++    bool is_single_char = (constraint.span == 1);
++
++    auto& end_map = edge_it->second;
++    DLOG(INFO) << "  label_base=[" << label_base
++               << "] is_single=" << is_single_char
++               << " end_map_size=" << end_map.size();
++
++    size_t total_before = 0;
++    for (const auto& [ep, sm] : end_map) {
++      total_before += sm.size();
++      DLOG(INFO) << "    end_pos=" << ep << " syllables=" << sm.size();
++    }
++    DLOG(INFO) << "  total_syllables_before=" << total_before;
++    for (auto end_it = end_map.begin(); end_it != end_map.end();) {
++      size_t end_pos = end_it->first;
++      auto& spelling_map = end_it->second;  // map<SyllableId, EdgeProperties>
++
++      // A single-key initial may represent a syllable spanning multiple input
++      // positions (for example, T9 "n" matches "ni"). Full syllables must
++      // still consume exactly the selected input span.
++      if (!is_single_char && end_pos != graph_pos + constraint.span) {
++        end_it = end_map.erase(end_it);
++        continue;
++      }
++
++      // Filter syllables in this edge
++      for (auto syl_it = spelling_map.begin(); syl_it != spelling_map.end();) {
++        string decoded = DecodeSyllableId(dict, syl_it->first);
++        string decoded_base = StripTones(decoded);
++        bool keep = false;
++
++        if (is_single_char) {
++          // 简拼: match first letter
++          if (!decoded_base.empty() &&
++              std::tolower(decoded_base[0]) == std::tolower(label_base[0])) {
++            keep = true;
++          }
++        } else {
++          // Full syllable: tone-insensitive match
++          if (decoded_base == label_base) {
++            keep = true;
++          }
++        }
++
++        DLOG(INFO) << "      syl_id=" << syl_it->first << " decoded=["
++                   << decoded << "]"
++                   << " base=[" << decoded_base << "]"
++                   << " keep=" << keep;
++
++        if (keep)
++          ++syl_it;
++        else
++          syl_it = spelling_map.erase(syl_it);
++      }
++
++      // If no syllables left in this edge, remove the edge
++      if (spelling_map.empty())
++        end_it = end_map.erase(end_it);
++      else
++        ++end_it;
++    }
++    size_t total_after = 0;
++    for (const auto& [ep, sm] : end_map)
++      total_after += sm.size();
++    DLOG(INFO) << "  total_syllables_after=" << total_after
++               << " end_map_size_after=" << end_map.size();
++  }
++
++  // Rebuild indices from filtered edges (Transpose)
++  syllable_graph_.indices.clear();
++  for (const auto& start : syllable_graph_.edges) {
++    auto& index(syllable_graph_.indices[start.first]);
++    for (const auto& end : start.second) {
++      for (const auto& spelling : end.second) {
++        SyllableId syll_id = spelling.first;
++        index[syll_id].push_back(&spelling.second);
++      }
++    }
++  }
++}
++
+ bool ScriptSyllabifier::IsCorrection(const Code& code,
+                                      size_t code_length) const {
+   vector<bool> path_attributes;
+@@ -452,6 +726,7 @@ static bool has_exact_match_phrase(Ptr ptr, Iter iter, size_t consumed) {
+ 
+ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
+   size_t consumed = syllabifier_->BuildSyllableGraph(*dict->prism());
++
+   const auto& syllable_graph = syllabifier_->syllable_graph();
+   bool predict_word = translator_->enable_word_completion() &&
+                       start_ + consumed == end_of_input_;
+@@ -643,6 +918,7 @@ iter_incremented:
+         New<Phrase>(translator_->language(),
+                     entry->IsPredictiveMatch() ? "completion" : "user_phrase",
+                     start_, start_ + user_phrase_code_length, entry);
++    candidate_->set_dictionary(translator_->primary_dictionary());
+     candidate_->set_quality(std::exp(entry->weight) +
+                             translator_->initial_quality() +
+                             (entry->quality_len / full_code_length));
+@@ -661,6 +937,7 @@ iter_incremented:
+         New<Phrase>(translator_->language(),
+                     entry->IsPredictiveMatch() ? "completion" : "phrase",
+                     start_, start_ + phrase_code_length, entry);
++    candidate_->set_dictionary(translator_->primary_dictionary());
+     candidate_->set_quality(std::exp(entry->weight) +
+                             translator_->initial_quality() +
+                             (entry->quality_len / full_code_length));
+@@ -727,6 +1004,7 @@ deque<an<Sentence>> ScriptTranslation::MakeSentences(
+   for (auto& sentence : sentences) {
+     sentence->Offset(start_);
+     sentence->set_syllabifier(syllabifier_);
++    sentence->set_dictionary(dict);
+   }
+   return sentences;
+ }
+@@ -740,6 +1018,7 @@ an<Sentence> ScriptTranslation::MakeSentence(Dictionary* dict,
+                               translator_->GetPrecedingText(start_))) {
+     sentence->Offset(start_);
+     sentence->set_syllabifier(syllabifier_);
++    sentence->set_dictionary(dict);
+     return sentence;
+   }
+   return nullptr;
+diff --git a/src/rime/gear/script_translator.h b/src/rime/gear/script_translator.h
+index e5b60a7a..5a740b3a 100644
+--- a/src/rime/gear/script_translator.h
++++ b/src/rime/gear/script_translator.h
+@@ -11,6 +11,8 @@
+ #include <rime/translation.h>
+ #include <rime/translator.h>
+ #include <rime/algo/algebra.h>
++#include <rime/algo/syllabifier.h>
++#include <rime/context.h>
+ #include <rime/gear/memory.h>
+ #include <rime/gear/translator_commons.h>
+ 
+@@ -22,7 +24,21 @@ struct DictEntry;
+ class Dictionary;
+ class Poet;
+ class UserDictionary;
+-struct SyllableGraph;
++
++class ConstraintFilteredTranslation : public CacheTranslation {
++ public:
++  ConstraintFilteredTranslation(
++      an<Translation> translation,
++      Dictionary* dict,
++      const vector<Context::TabConstraint>& constraints);
++  bool Next() override;
++
++ protected:
++  bool MatchesConstraints(const an<Candidate>& candidate);
++
++  Dictionary* dict_;
++  vector<Context::TabConstraint> constraints_;
++};
+ 
+ class ScriptTranslator : public Translator,
+                          public Memory,
+@@ -53,6 +69,18 @@ class ScriptTranslator : public Translator,
+   int max_word_length() const { return max_word_length_; }
+   int core_word_length() const;
+ 
++  //! Collect possible tab entries from the SyllableGraph
++  RIME_DLL void CollectSyllableTabs(size_t start_pos,
++                                    vector<InputTabEntry>* tabs) const;
++
++  // override Translator virtual methods
++  void CollectInputTabs(size_t position,
++                        vector<InputTabEntry>* tabs) const override {
++    CollectSyllableTabs(position, tabs);
++  }
++  Dictionary* primary_dictionary() const override { return dict(); }
++  string reverse_lookup_prefix() const override { return ""; }
++
+  protected:
+   int max_homophones_ = 1;
+   int spelling_hints_ = 0;
+diff --git a/src/rime/gear/table_translator.cc b/src/rime/gear/table_translator.cc
+index 67bc2292..b7aed6d2 100644
+--- a/src/rime/gear/table_translator.cc
++++ b/src/rime/gear/table_translator.cc
+@@ -16,7 +16,9 @@
+ #include <rime/engine.h>
+ #include <rime/schema.h>
+ #include <rime/translation.h>
++#include <rime/algo/syllabifier.h>
+ #include <rime/dict/dictionary.h>
++#include <rime/dict/table.h>
+ #include <rime/dict/user_dictionary.h>
+ #include <rime/gear/charset_filter.h>
+ #include <rime/gear/poet.h>
+@@ -32,6 +34,7 @@ static const char* kUnitySymbol = " \xe2\x98\xaf ";
+ 
+ TableTranslation::TableTranslation(TranslatorOptions* options,
+                                    const Language* language,
++                                   Dictionary* dictionary,
+                                    const string& input,
+                                    size_t start,
+                                    size_t end,
+@@ -40,6 +43,7 @@ TableTranslation::TableTranslation(TranslatorOptions* options,
+                                    UserDictEntryIterator&& uter)
+     : options_(options),
+       language_(language),
++      dictionary_(dictionary),
+       input_(input),
+       start_(start),
+       end_(end),
+@@ -85,6 +89,7 @@ an<Candidate> TableTranslation::Peek() {
+                                : "table";
+   auto phrase = New<Phrase>(language_, type, start_, end_, e);
+   if (phrase) {
++    phrase->set_dictionary(dictionary_);
+     phrase->set_comment(comment);
+     phrase->set_preedit(preedit_);
+     phrase->set_quality(std::exp(e->weight) + options_->initial_quality() +
+@@ -146,6 +151,7 @@ LazyTableTranslation::LazyTableTranslation(TableTranslator* translator,
+                                            bool enable_user_dict)
+     : TableTranslation(translator,
+                        translator->language(),
++                       translator->dict(),
+                        input,
+                        start,
+                        end,
+@@ -245,7 +251,9 @@ an<Translation> TableTranslator::Query(const string& input,
+                                        const Segment& segment) {
+   if (!segment.HasAnyTagIn(tags_))
+     return nullptr;
+-  DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
++  const string shadow_input =
++      engine_->context()->shadow_input(segment.start, segment.end);
++  DLOG(INFO) << "input = '" << shadow_input << "', [" << segment.start << ", "
+              << segment.end << ")";
+ 
+   FinishSession();
+@@ -253,15 +261,15 @@ an<Translation> TableTranslator::Query(const string& input,
+   bool enable_user_dict =
+       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);
+ 
+-  const string& preedit(input);
+-  string code = input;
++  const string& preedit(shadow_input);
++  string code = shadow_input;
+   boost::trim_right_if(code, boost::is_any_of(delimiters_));
+ 
+   an<Translation> translation;
+   if (enable_completion_) {
+-    translation = Cached<LazyTableTranslation>(this, code, segment.start,
+-                                               segment.start + input.length(),
+-                                               preedit, enable_user_dict);
++    translation = Cached<LazyTableTranslation>(
++        this, code, segment.start, segment.start + shadow_input.length(),
++        preedit, enable_user_dict);
+   } else {
+     DictEntryIterator iter;
+     if (dict_ && dict_->loaded()) {
+@@ -276,8 +284,9 @@ an<Translation> TableTranslator::Query(const string& input,
+     }
+     if (!iter.exhausted() || !uter.exhausted())
+       translation = Cached<TableTranslation>(
+-          this, language(), code, segment.start, segment.start + input.length(),
+-          preedit, std::move(iter), std::move(uter));
++          this, language(), dict(), code, segment.start,
++          segment.start + shadow_input.length(), preedit, std::move(iter),
++          std::move(uter));
+   }
+   if (translation) {
+     bool filter_by_charset =
+@@ -291,10 +300,10 @@ an<Translation> TableTranslator::Query(const string& input,
+     translation.reset();  // discard futile translation
+   }
+   if (enable_sentence_ && !translation) {
+-    translation = MakeSentence(input, segment.start,
++    translation = MakeSentence(shadow_input, segment.start,
+                                /* include_prefix_phrases = */ true);
+   } else if (sentence_over_completion_ && starts_with_completion(translation)) {
+-    if (auto sentence = MakeSentence(input, segment.start)) {
++    if (auto sentence = MakeSentence(shadow_input, segment.start)) {
+       translation = sentence + translation;
+     }
+   }
+@@ -463,6 +472,7 @@ an<Candidate> SentenceTranslation::Peek() {
+   auto result = New<Phrase>(translator_ ? translator_->language() : NULL,
+                             is_user_phrase ? "user_table" : "table", start_,
+                             start_ + code_length, entry);
++  result->set_dictionary(translator_->primary_dictionary());
+   if (translator_) {
+     string preedit = input_.substr(0, code_length);
+     translator_->preedit_formatter().Apply(&preedit);
+@@ -493,6 +503,7 @@ void SentenceTranslation::PrepareSentence() {
+   }
+   translator_->preedit_formatter().Apply(&preedit);
+   sentence_->set_preedit(preedit);
++  sentence_->set_dictionary(translator_->primary_dictionary());
+ }
+ 
+ bool SentenceTranslation::CheckEmpty() {
+@@ -684,4 +695,79 @@ an<Translation> TableTranslator::MakeSentence(const string& input,
+   return nullptr;
+ }
+ 
++void TableTranslator::CollectTableTabs(size_t start_pos,
++                                       vector<InputTabEntry>* tabs) const {
++  if (!dict_ || !dict_->loaded() || !engine_ || !engine_->context())
++    return;
++
++  const string& input = engine_->context()->input();
++  if (start_pos >= input.length())
++    return;
++  string code = input.substr(start_pos);
++  if (code.empty())
++    return;
++
++  // Rebuild SyllableGraph from current input
++  SyllableGraph graph;
++  Syllabifier syllabifier("", false, false);  // table codes: no delimiters
++  syllabifier.BuildSyllableGraph(code, *dict_->prism(), &graph);
++  if (graph.edges.empty())
++    return;
++
++  // Collect all edges from position 0
++  auto it = graph.edges.find(0);
++  if (it == graph.edges.end())
++    return;
++
++  // Parse algebra rules to build reverse mapping
++  map<char, set<char>> key_reverse;
++  if (engine_ && engine_->schema() && engine_->schema()->config()) {
++    key_reverse = ParseAlgebraReverseMapping(engine_->schema()->config());
++  }
++
++  set<string> seen;
++  bool has_single_span = false;
++  for (const auto& [end_pos, syllable_map] : it->second) {
++    if (end_pos == 1) {
++      has_single_span = true;
++      if (!key_reverse.empty() && key_reverse.count(code[0]))
++        continue;  // Skip span=1 noise when key mapping applies
++    }
++    for (const auto& [syllable_id, props] : syllable_map) {
++      // Decode syllable ID to code string
++      Code single_code;
++      single_code.push_back(syllable_id);
++      vector<string> decoded;
++      if (dict_->Decode(single_code, &decoded) && !decoded.empty()) {
++        string label = decoded[0];
++        // Strip tones (same logic as script translator)
++        label = StripTones(label);
++        if (!label.empty() && seen.insert(label).second) {
++          tabs->emplace_back(
++              InputTabEntry{label, end_pos, InputTabEntry::kTableCode});
++        }
++      }
++    }
++  }
++
++  // Generate partial-match tabs from reverse key mapping
++  if ((!has_single_span || (key_reverse.count(code[0]) > 0)) && !code.empty()) {
++    auto rev_it = key_reverse.find(code[0]);
++    if (rev_it != key_reverse.end()) {
++      for (char c : rev_it->second) {
++        string label(1, c);
++        if (seen.insert(label).second) {
++          tabs->emplace_back(
++              InputTabEntry{label, 1, InputTabEntry::kTableCode});
++        }
++      }
++      // Raw input character as a tab
++      string raw(1, code[0]);
++      if (seen.insert(raw).second) {
++        tabs->emplace_back(InputTabEntry{raw, 1, InputTabEntry::kRawInput});
++      }
++    }
++  }
++}
++
+ }  // namespace rime
+diff --git a/src/rime/gear/table_translator.h b/src/rime/gear/table_translator.h
+index 7057ed4b..a7279034 100644
+--- a/src/rime/gear/table_translator.h
++++ b/src/rime/gear/table_translator.h
+@@ -37,6 +37,18 @@ class TableTranslator : public Translator,
+   string GetPrecedingText(size_t start) const;
+   UnityTableEncoder* encoder() const { return encoder_.get(); }
+ 
++  //! Collect valid single-code-prefix tab entries from the table's syllabary
++  RIME_DLL void CollectTableTabs(size_t start_pos,
++                                 vector<InputTabEntry>* tabs) const;
++
++  // override Translator virtual methods
++  void CollectInputTabs(size_t position,
++                        vector<InputTabEntry>* tabs) const override {
++    CollectTableTabs(position, tabs);
++  }
++  Dictionary* primary_dictionary() const override { return dict(); }
++  string reverse_lookup_prefix() const override { return ""; }
++
+  protected:
+   bool enable_charset_filter_ = false;
+   bool enable_encoder_ = false;
+@@ -53,6 +65,7 @@ class TableTranslation : public Translation {
+  public:
+   TableTranslation(TranslatorOptions* options,
+                    const Language* language,
++                   Dictionary* dictionary,
+                    const string& input,
+                    size_t start,
+                    size_t end,
+@@ -76,6 +89,7 @@ class TableTranslation : public Translation {
+ 
+   TranslatorOptions* options_;
+   const Language* language_;
++  Dictionary* dictionary_;
+   string input_;
+   size_t start_;
+   size_t end_;
+diff --git a/src/rime/gear/translator_commons.cc b/src/rime/gear/translator_commons.cc
+index 7fc0f272..eadcf53e 100644
+--- a/src/rime/gear/translator_commons.cc
++++ b/src/rime/gear/translator_commons.cc
+@@ -177,4 +177,69 @@ bool TranslatorOptions::IsUserDictDisabledFor(const string& input) const {
+   return false;
+ }
+ 
++string StripTones(const string& s) {
++  static const map<string, string> tone_map = {
++      {"ā", "a"}, {"á", "a"}, {"ǎ", "a"}, {"à", "a"}, {"ē", "e"}, {"é", "e"},
++      {"ě", "e"}, {"è", "e"}, {"ī", "i"}, {"í", "i"}, {"ǐ", "i"}, {"ì", "i"},
++      {"ō", "o"}, {"ó", "o"}, {"ǒ", "o"}, {"ò", "o"}, {"ū", "u"}, {"ú", "u"},
++      {"ǔ", "u"}, {"ù", "u"}, {"ǖ", "v"}, {"ǘ", "v"}, {"ǚ", "v"}, {"ǜ", "v"},
++      {"ń", "n"}, {"ň", "n"}, {"ǹ", "n"},
++  };
++  string result = s;
++  for (const auto& [toned, base] : tone_map) {
++    size_t pos = 0;
++    while ((pos = result.find(toned, pos)) != string::npos) {
++      result.replace(pos, toned.length(), base);
++      pos += base.length();
++    }
++  }
++  return result;
++}
++
++map<char, set<char>> ParseAlgebraReverseMapping(Config* config) {
++  map<char, set<char>> reverse_map;
++  if (!config)
++    return reverse_map;
++  auto algebra = config->GetList("speller/algebra");
++  if (!algebra)
++    return reverse_map;
++  for (size_t i = 0; i < algebra->size(); ++i) {
++    auto rule = As<ConfigValue>(algebra->GetAt(i));
++    if (!rule)
++      continue;
++    string s = rule->str();
++    if (s.substr(0, 5) == "xlit/") {
++      auto slash1 = s.find('/', 5);
++      if (slash1 == string::npos)
++        continue;
++      string from = s.substr(5, slash1 - 5);
++      string to = s.substr(slash1 + 1);
++      if (!to.empty() && to.back() == '/')
++        to.pop_back();
++      size_t len = std::min(from.size(), to.size());
++      for (size_t j = 0; j < len; ++j) {
++        reverse_map[to[j]].insert(from[j]);
++      }
++    } else if (s.substr(0, 8) == "derive/[") {
++      auto close_bracket = s.find(']', 8);
++      if (close_bracket == string::npos)
++        continue;
++      auto slash2 = s.find('/', close_bracket + 1);
++      if (slash2 == string::npos)
++        continue;
++      auto slash3 = s.find('/', slash2 + 1);
++      if (slash3 == string::npos)
++        continue;
++      string from = s.substr(8, close_bracket - 8);
++      string to = s.substr(slash2 + 1, slash3 - slash2 - 1);
++      if (to.size() == 1) {
++        for (char c : from) {
++          reverse_map[to[0]].insert(c);
++        }
++      }
++    }
++  }
++  return reverse_map;
++}
++
+ }  // namespace rime
+diff --git a/src/rime/gear/translator_commons.h b/src/rime/gear/translator_commons.h
+index 6217e5a7..44cff5ca 100644
+--- a/src/rime/gear/translator_commons.h
++++ b/src/rime/gear/translator_commons.h
+@@ -59,6 +59,7 @@ class PhraseSyllabifier {
+ //
+ 
+ class Language;
++class Dictionary;
+ 
+ class Phrase : public Candidate {
+  public:
+@@ -81,6 +82,8 @@ class Phrase : public Candidate {
+   Code& code() const { return entry_->code; }
+   const DictEntry& entry() const { return *entry_; }
+   const Language* language() const { return language_; }
++  Dictionary* dictionary() const { return dictionary_; }
++  void set_dictionary(Dictionary* dictionary) { dictionary_ = dictionary; }
+   size_t matching_code_size() const {
+     return entry_->matching_code_size != 0 ? entry_->matching_code_size
+                                            : entry_->code.size();
+@@ -105,6 +108,7 @@ class Phrase : public Candidate {
+ 
+  protected:
+   const Language* language_;
++  Dictionary* dictionary_ = nullptr;
+   an<DictEntry> entry_;
+   an<PhraseSyllabifier> syllabifier_;
+ };
+@@ -184,6 +188,15 @@ class TranslatorOptions {
+   hash_set<string> blacklist_;
+ };
+ 
++// Shared utilities for tab disambiguation
++
++// Strip pinyin tone marks for case/tone-insensitive comparison
++string StripTones(const string& s);
++
++// Parse speller/algebra xlit and derive rules to build
++// a reverse mapping: digit → set of letters
++map<char, set<char>> ParseAlgebraReverseMapping(Config* config);
++
+ }  // namespace rime
+ 
+ #endif  // RIME_TRANSLATOR_COMMONS_H_
 diff --git a/src/rime/service.h b/src/rime/service.h
-index a69ae741..9b3d4b16 100644
+index a69ae741..76438819 100644
 --- a/src/rime/service.h
 +++ b/src/rime/service.h
-@@ -44,11 +44,11 @@ class Session {
+@@ -42,6 +42,7 @@ class Session {
+ 
+   Context* context() const;
    Schema* schema() const;
++  Engine* engine() const { return engine_.get(); }
    time_t last_active_time() const { return last_active_time_; }
    const string& commit_text() const { return commit_text_; }
--
-- private:
--  void OnCommit(const string& commit_text);
--
-   the<Engine> engine_;
+ 
+diff --git a/src/rime/translator.h b/src/rime/translator.h
+index 78ba7e22..43117f0b 100644
+--- a/src/rime/translator.h
++++ b/src/rime/translator.h
+@@ -15,10 +15,19 @@
+ namespace rime {
+ 
+ class Context;
++class Dictionary;
+ class Engine;
+ class Translation;
+ struct Segment;
+ 
++//! Tab entry for input disambiguation
++struct InputTabEntry {
++  enum Source { kSyllable, kTableCode, kReverseLookup, kRawInput };
++  std::string label;
++  size_t span;
++  int source;  // one of Source enum values
++};
 +
-+ private:
-+  void OnCommit(const string& commit_text);
+ class Translator : public Class<Translator, const Ticket&> {
+  public:
+   explicit Translator(const Ticket& ticket)
+@@ -28,6 +37,18 @@ class Translator : public Class<Translator, const Ticket&> {
+   virtual an<Translation> Query(const string& input,
+                                 const Segment& segment) = 0;
+ 
++  //! Override to collect tab entries for disambiguation at a position.
++  virtual void CollectInputTabs(size_t position,
++                                vector<InputTabEntry>* tabs) const {}
++  //! Override to return the primary dictionary for code lookup.
++  virtual Dictionary* primary_dictionary() const { return nullptr; }
++  //! Override to return the reverse lookup prefix, if any.
++  virtual string reverse_lookup_prefix() const { return ""; }
++  //! Return whether this translator owns the given reverse lookup segment.
++  virtual bool IsReverseLookupSegment(const Segment& segment) const {
++    return false;
++  }
 +
-   time_t last_active_time_ = 0;
-   string commit_text_;
- };
+   string name_space() const { return name_space_; }
+ 
+  protected:
+diff --git a/src/rime_api.h b/src/rime_api.h
+index 2fccde0f..34b0aa08 100644
+--- a/src/rime_api.h
++++ b/src/rime_api.h
+@@ -505,6 +505,54 @@ typedef struct RIME_FLAVORED(rime_api_t) {
+                                               size_t index);
+ 
+   Bool (*change_page)(RimeSessionId session_id, Bool backward);
++
++  // --- Input tab disambiguation API ---
++
++  //! Get possible input tab entries for disambiguation at the current
++  //! composition position. Merges data from all translators:
++  //!   ScriptTranslator: SyllableGraph edges (pinyin syllables)
++  //!   TableTranslator: valid code prefixes from table syllabary
++  //!   ReverseLookupTranslator: pinyin readings from reverse lookup
++  //! Returns True if tabs were found.
++  //! Caller must free with free_input_tabs().
++  Bool (*get_input_tabs)(RimeSessionId session_id,
++                         size_t position,
++                         char*** labels,
++                         size_t** spans,
++                         int** sources,
++                         size_t* count);
++  void (*free_input_tabs)(char** labels,
++                          size_t* spans,
++                          int* sources,
++                          size_t count);
++
++  //! Get the decoded code segments for a candidate at the given index.
++  //! E.g. pinyin "你好" → segments=["ni","hao"], matching_segments=2
++  //! Returns True if code info was found.
++  //! Caller must free with free_candidate_code().
++  Bool (*get_candidate_code)(RimeSessionId session_id,
++                             size_t index,
++                             char*** segments,
++                             size_t* num_segments,
++                             size_t* matching_segments);
++  void (*free_candidate_code)(char** segments, size_t num_segments);
++
++  //! Get configured reverse lookup prefix characters.
++  //! E.g. returns ["z"] for wubi schema with z-prefix reverse lookup.
++  Bool (*get_reverse_lookup_prefixes)(RimeSessionId session_id,
++                                      char*** prefixes,
++                                      size_t* count);
++  void (*free_reverse_lookup_prefixes)(char** prefixes, size_t count);
++
++  //! Select a tab to constrain syllable disambiguation.
++  //! Adds a constraint to Context and triggers re-composition.
++  Bool (*select_tab)(RimeSessionId session_id,
++                     size_t position,
++                     const char* label,
++                     size_t span);
++
++  //! Clear all tab constraints and restore unconstrained candidates.
++  Bool (*clear_tabs)(RimeSessionId session_id);
+ } RIME_FLAVORED(RimeApi);
+ 
+ //! API entry
 diff --git a/src/rime_api_impl.h b/src/rime_api_impl.h
-index 30f4514f..c17d4794 100644
+index 30f4514f..4a2784f7 100644
 --- a/src/rime_api_impl.h
 +++ b/src/rime_api_impl.h
-@@ -17,6 +17,8 @@
+@@ -17,6 +17,10 @@
  #include <rime/setup.h>
  #include <rime/signature.h>
  #include <rime/switches.h>
 +#include <rime/engine.h>
-+#include <rime/switcher.h>
++#include <rime/candidate.h>
++#include <rime/dict/dictionary.h>
++#include <rime/gear/translator_commons.h>
  
  using namespace rime;
  
-@@ -430,6 +432,13 @@ RIME_DEPRECATED void RimeSetOption(RimeSessionId session_id,
-   if (!ctx)
-     return;
-   ctx->set_option(option, !!value);
-+  auto engine = session->engine_.get();
-+  auto switcher = engine->switcher_;
-+  if (switcher->IsAutoSave(option)) {
-+    if (Config* user_config = switcher->user_config()) {
-+      user_config->SetBool("var/option/" + std::string(option), value);
+@@ -1129,6 +1133,208 @@ void RimeGetStagingDirSecure(char* dir, size_t buffer_size);
+ void RimeGetSyncDirSecure(char* dir, size_t buffer_size);
+ const char* RimeGetVersion();
+ 
++// --- Input tab disambiguation API ---
++
++static Bool RimeGetInputTabs(RimeSessionId session_id,
++                             size_t position,
++                             char*** labels,
++                             size_t** spans,
++                             int** sources,
++                             size_t* count) {
++  an<Session> session(Service::instance().GetSession(session_id));
++  if (!session)
++    return False;
++  Engine* engine = session->engine();
++  if (!engine)
++    return False;
++  Context* ctx = engine->context();
++  if (!ctx || ctx->composition().empty())
++    return False;
++
++  // Use provided position; 0 means "current cursor"
++  size_t start_pos = (position == 0) ? ctx->CurrentTabCursor() : position;
++  if (start_pos >= ctx->input().length()) {
++    if (position == 0) {
++      // Auto-computed position past input: all syllables selected, no tabs
++      *count = 0;
++      return False;
++    }
++    start_pos = ctx->composition().GetCurrentStartPosition();
++  }
++  vector<InputTabEntry> tabs;
++  engine->CollectInputTabs(start_pos, &tabs);
++  if (position == 0 && tabs.empty()) {
++    for (size_t try_pos = start_pos + 1; try_pos < ctx->input().length();
++         ++try_pos) {
++      engine->CollectInputTabs(try_pos, &tabs);
++      if (!tabs.empty()) {
++        start_pos = try_pos;
++        break;
++      }
 +    }
 +  }
++
++  // Deduplicate by label (keep first occurrence)
++  vector<InputTabEntry> unique_tabs;
++  set<string> seen;
++  for (auto& tab : tabs) {
++    if (seen.insert(tab.label).second) {
++      unique_tabs.push_back(tab);
++    }
++  }
++
++  if (unique_tabs.empty())
++    return False;
++
++  *count = unique_tabs.size();
++  *labels = new char*[*count];
++  *spans = new size_t[*count];
++  *sources = new int[*count];
++  for (size_t i = 0; i < *count; ++i) {
++    const auto& [label, span, source] = unique_tabs[i];
++    (*labels)[i] = new char[label.length() + 1];
++    std::strcpy((*labels)[i], label.c_str());
++    (*spans)[i] = span;
++    (*sources)[i] = source;
++  }
++  return True;
++}
++
++static void RimeFreeInputTabs(char** labels,
++                              size_t* spans,
++                              int* sources,
++                              size_t count) {
++  if (labels) {
++    for (size_t i = 0; i < count; ++i)
++      delete[] labels[i];
++    delete[] labels;
++  }
++  delete[] spans;
++  delete[] sources;
++}
++
++static Bool RimeGetCandidateCode(RimeSessionId session_id,
++                                 size_t index,
++                                 char*** segments,
++                                 size_t* num_segments,
++                                 size_t* matching_segments) {
++  an<Session> session(Service::instance().GetSession(session_id));
++  if (!session)
++    return False;
++  Engine* engine = session->engine();
++  if (!engine)
++    return False;
++  Context* ctx = engine->context();
++  if (!ctx || ctx->composition().empty())
++    return False;
++
++  auto& seg = ctx->composition().back();
++  if (!seg.menu)
++    return False;
++
++  auto cand = seg.menu->GetCandidateAt(index);
++  if (!cand)
++    return False;
++
++  auto phrase = As<Phrase>(Candidate::GetGenuineCandidate(cand));
++  if (!phrase)
++    return False;
++
++  Dictionary* dict = phrase->dictionary();
++  if (!dict || !dict->loaded())
++    return False;
++
++  vector<string> decoded;
++  if (!dict->Decode(phrase->code(), &decoded) || decoded.empty())
++    return False;
++
++  *num_segments = decoded.size();
++  *matching_segments = phrase->matching_code_size();
++  if (*matching_segments == 0)
++    *matching_segments = decoded.size();
++
++  *segments = new char*[*num_segments];
++  for (size_t i = 0; i < *num_segments; ++i) {
++    (*segments)[i] = new char[decoded[i].length() + 1];
++    std::strcpy((*segments)[i], decoded[i].c_str());
++  }
++  return True;
++}
++
++static void RimeFreeCandidateCode(char** segments, size_t num_segments) {
++  if (segments) {
++    for (size_t i = 0; i < num_segments; ++i)
++      delete[] segments[i];
++    delete[] segments;
++  }
++}
++
++static Bool RimeGetReverseLookupPrefixes(RimeSessionId session_id,
++                                         char*** prefixes,
++                                         size_t* count) {
++  an<Session> session(Service::instance().GetSession(session_id));
++  if (!session)
++    return False;
++  Engine* engine = session->engine();
++  if (!engine)
++    return False;
++
++  vector<string> result;
++  engine->GetReverseLookupPrefixes(&result);
++
++  if (result.empty())
++    return False;
++
++  *count = result.size();
++  *prefixes = new char*[*count];
++  for (size_t i = 0; i < *count; ++i) {
++    (*prefixes)[i] = new char[result[i].length() + 1];
++    std::strcpy((*prefixes)[i], result[i].c_str());
++  }
++  return True;
++}
++
++static void RimeFreeReverseLookupPrefixes(char** prefixes, size_t count) {
++  if (prefixes) {
++    for (size_t i = 0; i < count; ++i)
++      delete[] prefixes[i];
++    delete[] prefixes;
++  }
++}
++
++static Bool RimeSelectTab(RimeSessionId session_id,
++                          size_t position,
++                          const char* label,
++                          size_t span) {
++  an<Session> session(Service::instance().GetSession(session_id));
++  if (!session || !label)
++    return False;
++  Context* ctx = session->context();
++  if (!ctx)
++    return False;
++
++  // position=0 means auto-compute from current tree cursor
++  if (position == 0) {
++    position = ctx->CurrentTabCursor();
++  }
++
++  ctx->PushTabCursor(position + span);
++  ctx->AddTabConstraint(position, string(label), span);
++  return True;
++}
++
++static Bool RimeClearTabs(RimeSessionId session_id) {
++  an<Session> session(Service::instance().GetSession(session_id));
++  if (!session)
++    return False;
++  Context* ctx = session->context();
++  if (!ctx)
++    return False;
++  ctx->ClearTabCursors();
++  ctx->ClearTabConstraints();
++  return True;
++}
++
+ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
+   static RIME_FLAVORED(RimeApi) s_api = {0};
+   if (!s_api.data_size) {
+@@ -1232,6 +1438,15 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
+     s_api.highlight_candidate_on_current_page =
+         &RimeHighlightCandidateOnCurrentPage;
+     s_api.change_page = &RimeChangePage;
++    // Input tab disambiguation API
++    s_api.get_input_tabs = &RimeGetInputTabs;
++    s_api.free_input_tabs = &RimeFreeInputTabs;
++    s_api.get_candidate_code = &RimeGetCandidateCode;
++    s_api.free_candidate_code = &RimeFreeCandidateCode;
++    s_api.get_reverse_lookup_prefixes = &RimeGetReverseLookupPrefixes;
++    s_api.free_reverse_lookup_prefixes = &RimeFreeReverseLookupPrefixes;
++    s_api.select_tab = &RimeSelectTab;
++    s_api.clear_tabs = &RimeClearTabs;
+   }
+   return &s_api;
  }
- 
- RIME_DEPRECATED Bool RimeGetOption(RimeSessionId session_id,
