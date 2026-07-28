@@ -1,5 +1,5 @@
 diff --git a/src/rime/context.cc b/src/rime/context.cc
-index ec840a3e..dc807189 100644
+index ec840a3e..39d5e5c5 100644
 --- a/src/rime/context.cc
 +++ b/src/rime/context.cc
 @@ -70,6 +70,8 @@ bool Context::PushInput(char ch) {
@@ -56,7 +56,7 @@ index ec840a3e..dc807189 100644
    update_notifier_(this);
  }
  
-@@ -280,9 +301,47 @@ void Context::set_composition(Composition&& comp) {
+@@ -280,9 +301,81 @@ void Context::set_composition(Composition&& comp) {
  void Context::set_input(const string& value) {
    input_ = value;
    caret_pos_ = input_.length();
@@ -86,11 +86,45 @@ index ec840a3e..dc807189 100644
 +           trimmed_label.back() >= '1' && trimmed_label.back() <= '5') {
 +      trimmed_label.pop_back();
 +    }
-+    // When the label is still longer than the span (e.g. bopomofo input
-+    // where pinyin labels are longer than the bopomofo characters they
-+    // replace), keep the original input substring.  ApplyTabConstraints
-+    // still filters the graph correctly by syllable ID.
-+    if (trimmed_label.length() > constraint.span) {
++    // Check whether the label and the original input use the same
++    // character system.  When neither is a substring of the other
++    // (after stripping digits) and the original is not pure digits
++    // (T9), keep the original substring.  ApplyTabConstraints still
++    // filters correctly by syllable ID.
++    string original_substr =
++        input_.substr(constraint.position, constraint.span);
++    string original_no_digits;
++    for (char c : original_substr) {
++      if (c < '0' || c > '9')
++        original_no_digits += c;
++    }
++    string label_no_digits;
++    for (char c : trimmed_label) {
++      if (c < '0' || c > '9')
++        label_no_digits += c;
++    }
++    // Labels and original input use the same character system only
++    // when they match exactly after digit stripping.  Single-char
++    // labels on pure-digit input are treated as T9 abbreviations.
++    bool same_system =
++        !label_no_digits.empty() && label_no_digits == original_no_digits;
++    bool digits_only = !original_substr.empty();
++    for (char c : original_substr) {
++      if (c < '0' || c > '9') {
++        digits_only = false;
++        break;
++      }
++    }
++    // T9-like digit input with single-char abbreviations.
++    // Multi-char labels on all-digit input are bopomofo encodings
++    // (e.g. "184" = ㄅㄚˋ → "ba"), not T9.
++    if (digits_only && label_no_digits.length() == 1)
++      same_system = true;
++    else if (digits_only && label_no_digits.length() >= 2)
++      same_system = false;
++    if (trimmed_label.length() > constraint.span ||
++        (!same_system && !digits_only) ||
++        (digits_only && label_no_digits.length() >= 2)) {
 +      shadow.append(input_, constraint.position, constraint.span);
 +    } else {
 +      shadow += trimmed_label;
@@ -104,7 +138,7 @@ index ec840a3e..dc807189 100644
  void Context::set_option(const string& name, bool value) {
    options_[name] = value;
    DLOG(INFO) << "Context::set_option " << name << " = " << value;
-@@ -324,4 +383,57 @@ void Context::ClearTransientOptions() {
+@@ -324,4 +417,57 @@ void Context::ClearTransientOptions() {
    }
  }
  
