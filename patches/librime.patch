@@ -1,5 +1,5 @@
 diff --git a/src/rime/context.cc b/src/rime/context.cc
-index ec840a3e..27a460df 100644
+index ec840a3e..dc807189 100644
 --- a/src/rime/context.cc
 +++ b/src/rime/context.cc
 @@ -70,6 +70,8 @@ bool Context::PushInput(char ch) {
@@ -56,7 +56,7 @@ index ec840a3e..27a460df 100644
    update_notifier_(this);
  }
  
-@@ -280,9 +301,31 @@ void Context::set_composition(Composition&& comp) {
+@@ -280,9 +301,47 @@ void Context::set_composition(Composition&& comp) {
  void Context::set_input(const string& value) {
    input_ = value;
    caret_pos_ = input_.length();
@@ -78,7 +78,23 @@ index ec840a3e..27a460df 100644
 +    if (constraint.position < raw_pos || constraint.position >= end)
 +      continue;
 +    shadow.append(input_, raw_pos, constraint.position - raw_pos);
-+    shadow += constraint.label;
++    // Strip trailing tone digits (1-5) from the label so it fits within
++    // the span.  Otherwise extra characters in the shadow input shift
++    // syllable-graph positions and break ApplyTabConstraints alignment.
++    string trimmed_label = constraint.label;
++    while (trimmed_label.length() > constraint.span && !trimmed_label.empty() &&
++           trimmed_label.back() >= '1' && trimmed_label.back() <= '5') {
++      trimmed_label.pop_back();
++    }
++    // When the label is still longer than the span (e.g. bopomofo input
++    // where pinyin labels are longer than the bopomofo characters they
++    // replace), keep the original input substring.  ApplyTabConstraints
++    // still filters the graph correctly by syllable ID.
++    if (trimmed_label.length() > constraint.span) {
++      shadow.append(input_, constraint.position, constraint.span);
++    } else {
++      shadow += trimmed_label;
++    }
 +    raw_pos = (std::min)(constraint.position + constraint.span, end);
 +  }
 +  shadow.append(input_, raw_pos, end - raw_pos);
@@ -88,7 +104,7 @@ index ec840a3e..27a460df 100644
  void Context::set_option(const string& name, bool value) {
    options_[name] = value;
    DLOG(INFO) << "Context::set_option " << name << " = " << value;
-@@ -324,4 +367,57 @@ void Context::ClearTransientOptions() {
+@@ -324,4 +383,57 @@ void Context::ClearTransientOptions() {
    }
  }
  
