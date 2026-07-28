@@ -1,5 +1,5 @@
 diff --git a/src/rime/context.cc b/src/rime/context.cc
-index ec840a3e..9ac75f0b 100644
+index ec840a3e..27a460df 100644
 --- a/src/rime/context.cc
 +++ b/src/rime/context.cc
 @@ -70,6 +70,8 @@ bool Context::PushInput(char ch) {
@@ -88,7 +88,7 @@ index ec840a3e..9ac75f0b 100644
  void Context::set_option(const string& name, bool value) {
    options_[name] = value;
    DLOG(INFO) << "Context::set_option " << name << " = " << value;
-@@ -324,4 +367,55 @@ void Context::ClearTransientOptions() {
+@@ -324,4 +367,57 @@ void Context::ClearTransientOptions() {
    }
  }
  
@@ -96,7 +96,9 @@ index ec840a3e..9ac75f0b 100644
 +                               const string& label,
 +                               size_t span) {
 +  tab_constraints_.push_back({position, label, span});
-+  RefreshNonConfirmedComposition();
++  if (!RefreshNonConfirmedComposition()) {
++    update_notifier_(this);
++  }
 +}
 +
 +void Context::ClearTabConstraints() {
@@ -325,7 +327,7 @@ index 37b3dda6..f512da82 100644
  }
  
 diff --git a/src/rime/gear/reverse_lookup_translator.cc b/src/rime/gear/reverse_lookup_translator.cc
-index c8c9e973..4a9b71e5 100644
+index c8c9e973..e2e23f55 100644
 --- a/src/rime/gear/reverse_lookup_translator.cc
 +++ b/src/rime/gear/reverse_lookup_translator.cc
 @@ -6,6 +6,7 @@
@@ -635,7 +637,7 @@ index 7ca038f6..69b4185e 100644
  
  }  // namespace rime
 diff --git a/src/rime/gear/script_translator.cc b/src/rime/gear/script_translator.cc
-index aef62178..a134d371 100644
+index aef62178..3b3483e6 100644
 --- a/src/rime/gear/script_translator.cc
 +++ b/src/rime/gear/script_translator.cc
 @@ -94,6 +94,8 @@ class ScriptSyllabifier : public PhraseSyllabifier {
@@ -647,7 +649,31 @@ index aef62178..a134d371 100644
    string GetPreeditString(const Phrase& cand) const;
    string GetOriginalSpelling(const Phrase& cand) const;
    bool IsCorrection(const Code& code, size_t code_length) const;
-@@ -204,14 +206,68 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
+@@ -116,6 +118,7 @@ class ScriptTranslation : public Translation {
+                     const string& input,
+                     size_t start,
+                     size_t end_of_input,
++                    const vector<Context::TabConstraint>& constraints,
+                     int max_sentences,
+                     double sentence_cutoff_threshold)
+       : translator_(translator),
+@@ -124,6 +127,7 @@ class ScriptTranslation : public Translation {
+         end_of_input_(end_of_input),
+         syllabifier_(
+             New<ScriptSyllabifier>(translator, corrector, input, start)),
++        constraints_(constraints),
+         enable_correction_(corrector),
+         max_sentences_(max_sentences),
+         sentence_cutoff_threshold_(sentence_cutoff_threshold) {
+@@ -151,6 +155,7 @@ class ScriptTranslation : public Translation {
+   size_t start_;
+   size_t end_of_input_;
+   an<ScriptSyllabifier> syllabifier_;
++  vector<Context::TabConstraint> constraints_;
+ 
+   an<DictEntryCollector> phrase_;
+   an<UserDictEntryCollector> user_phrase_;
+@@ -204,14 +209,68 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
    }
  }
  
@@ -718,29 +744,25 @@ index aef62178..a134d371 100644
  
    FinishSession();
  
-@@ -221,13 +277,18 @@ an<Translation> ScriptTranslator::Query(const string& input,
+@@ -221,13 +280,14 @@ an<Translation> ScriptTranslator::Query(const string& input,
    size_t end_of_input = engine_->context()->input().length();
    // the translator should survive translations it creates
    auto result = New<ScriptTranslation>(
 -      this, corrector_.get(), poet_.get(), input, segment.start, end_of_input,
 -      max_sentences_, sentence_cutoff_threshold_);
 +      this, corrector_.get(), poet_.get(), shadow_input, segment.start,
-+      end_of_input, max_sentences_, sentence_cutoff_threshold_);
++      end_of_input, engine_->context()->tab_constraints(), max_sentences_,
++      sentence_cutoff_threshold_);
    if (!result || !result->Evaluate(
                       dict_.get(), enable_user_dict ? user_dict_.get() : NULL)) {
      return nullptr;
    }
 -  auto deduped = New<DistinctTranslation>(result);
 +  an<Translation> deduped = New<DistinctTranslation>(result);
-+  const auto& constraints = engine_->context()->tab_constraints();
-+  if (!constraints.empty()) {
-+    deduped =
-+        New<ConstraintFilteredTranslation>(deduped, dict_.get(), constraints);
-+  }
    if (contextual_suggestions_) {
      return poet_->ContextualWeighted(deduped, input, segment.start, this);
    }
-@@ -347,6 +408,97 @@ bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
+@@ -347,6 +407,97 @@ bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
    return true;
  }
  
@@ -838,7 +860,7 @@ index aef62178..a134d371 100644
  // ScriptSyllabifier implementation
  
  Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
-@@ -369,6 +521,128 @@ size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
+@@ -369,6 +520,128 @@ size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
                                                   &syllable_graph_);
  }
  
@@ -967,15 +989,18 @@ index aef62178..a134d371 100644
  bool ScriptSyllabifier::IsCorrection(const Code& code,
                                       size_t code_length) const {
    vector<bool> path_attributes;
-@@ -452,6 +726,7 @@ static bool has_exact_match_phrase(Ptr ptr, Iter iter, size_t consumed) {
+@@ -452,6 +725,10 @@ static bool has_exact_match_phrase(Ptr ptr, Iter iter, size_t consumed) {
  
  bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
    size_t consumed = syllabifier_->BuildSyllableGraph(*dict->prism());
++  if (!constraints_.empty()) {
++    syllabifier_->ApplyTabConstraints(dict, constraints_);
++  }
 +
    const auto& syllable_graph = syllabifier_->syllable_graph();
    bool predict_word = translator_->enable_word_completion() &&
                        start_ + consumed == end_of_input_;
-@@ -643,6 +918,7 @@ iter_incremented:
+@@ -643,6 +920,7 @@ iter_incremented:
          New<Phrase>(translator_->language(),
                      entry->IsPredictiveMatch() ? "completion" : "user_phrase",
                      start_, start_ + user_phrase_code_length, entry);
@@ -983,7 +1008,7 @@ index aef62178..a134d371 100644
      candidate_->set_quality(std::exp(entry->weight) +
                              translator_->initial_quality() +
                              (entry->quality_len / full_code_length));
-@@ -661,6 +937,7 @@ iter_incremented:
+@@ -661,6 +939,7 @@ iter_incremented:
          New<Phrase>(translator_->language(),
                      entry->IsPredictiveMatch() ? "completion" : "phrase",
                      start_, start_ + phrase_code_length, entry);
@@ -991,7 +1016,7 @@ index aef62178..a134d371 100644
      candidate_->set_quality(std::exp(entry->weight) +
                              translator_->initial_quality() +
                              (entry->quality_len / full_code_length));
-@@ -727,6 +1004,7 @@ deque<an<Sentence>> ScriptTranslation::MakeSentences(
+@@ -727,6 +1006,7 @@ deque<an<Sentence>> ScriptTranslation::MakeSentences(
    for (auto& sentence : sentences) {
      sentence->Offset(start_);
      sentence->set_syllabifier(syllabifier_);
@@ -999,7 +1024,7 @@ index aef62178..a134d371 100644
    }
    return sentences;
  }
-@@ -740,6 +1018,7 @@ an<Sentence> ScriptTranslation::MakeSentence(Dictionary* dict,
+@@ -740,6 +1020,7 @@ an<Sentence> ScriptTranslation::MakeSentence(Dictionary* dict,
                                translator_->GetPrecedingText(start_))) {
      sentence->Offset(start_);
      sentence->set_syllabifier(syllabifier_);
@@ -1534,7 +1559,7 @@ index 2fccde0f..34b0aa08 100644
  
  //! API entry
 diff --git a/src/rime_api_impl.h b/src/rime_api_impl.h
-index 30f4514f..4a2784f7 100644
+index 30f4514f..d0518b9c 100644
 --- a/src/rime_api_impl.h
 +++ b/src/rime_api_impl.h
 @@ -17,6 +17,10 @@
@@ -1774,7 +1799,7 @@ index 30f4514f..4a2784f7 100644
  RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
    static RIME_FLAVORED(RimeApi) s_api = {0};
    if (!s_api.data_size) {
-@@ -1232,6 +1438,15 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
+@@ -1232,6 +1455,15 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
      s_api.highlight_candidate_on_current_page =
          &RimeHighlightCandidateOnCurrentPage;
      s_api.change_page = &RimeChangePage;
