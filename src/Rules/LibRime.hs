@@ -46,6 +46,7 @@ librimeRule = do
             -- remove absolute path by __FILE__ macro; tabs selectable; refactor tabs
             cmd_ (Cwd src) "git checkout ."
             cmd_ (Cwd src) "git apply ../patches/librime.patch"
+            cmd_ (Cwd src) "git apply ../patches/librime-perf-syllabifier-cache-repeated-QuerySpelling-iterat.patch"
             -- in-memory sorted cache for user dictionary queries
             cmd_ (Cwd src) "git apply ../patches/librime-userdict-cache.patch",
           cmakeFlags = \BuildEnv {..} ->
