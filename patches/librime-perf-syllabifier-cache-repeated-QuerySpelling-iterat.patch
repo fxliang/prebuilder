@@ -1,4 +1,4 @@
-From c93e244a68866f7060a747566ad8177a7bf17459 Mon Sep 17 00:00:00 2001
+From a9eb3d52d83007718fb2f0055c5efbde586281bd Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Wed, 29 Jul 2026 12:07:00 +0800
 Subject: [PATCH] perf(syllabifier): cache repeated QuerySpelling iterations in
@@ -15,43 +15,35 @@ As a supporting change, Prism::CommonPrefixSearch now reserves
 capacity on reused result vectors and explicitly clears on empty
 key for consistent behavior.
 ---
- src/rime/algo/syllabifier.cc |  41 ++++++++----
- src/rime/algo/syllabifier.h  |  14 +++++
+ src/rime/algo/syllabifier.cc |  40 ++++++++----
  src/rime/dict/prism.cc       |  19 ++++--
  test/prism_test.cc           |  28 +++++++++
  test/syllabifier_test.cc     | 119 ++++++++++++++++++++++++++++++++++-
- 5 files changed, 205 insertions(+), 16 deletions(-)
+ 4 files changed, 190 insertions(+), 16 deletions(-)
 
 diff --git a/src/rime/algo/syllabifier.cc b/src/rime/algo/syllabifier.cc
-index 11d0efc5..52725c84 100644
+index 11d0efc5..22577106 100644
 --- a/src/rime/algo/syllabifier.cc
 +++ b/src/rime/algo/syllabifier.cc
-@@ -28,16 +28,37 @@ using VertexQueue =
- const double kCompletionPenalty = -2.995732273553991;      // log(0.05)
- const double kCorrectionCredibility = -4.605170185988091;  // log(0.01)
- 
-+const Syllabifier::CachedSpellingList& Syllabifier::GetCachedSpellings(
-+    Prism& prism,
-+    SyllableId spelling_id) {
-+  auto it = spelling_cache_.find(spelling_id);
-+  if (it != spelling_cache_.end())
-+    return it->second;
-+  auto& result = spelling_cache_[spelling_id];
-+  SpellingAccessor accessor(prism.QuerySpelling(spelling_id));
-+  while (!accessor.exhausted()) {
-+    result.emplace_back(accessor.syllable_id(), accessor.properties());
-+    accessor.Next();
-+  }
-+  return result;
-+}
-+
- int Syllabifier::BuildSyllableGraph(const string& input,
-                                     Prism& prism,
-                                     SyllableGraph* graph) {
+@@ -34,10 +34,30 @@ int Syllabifier::BuildSyllableGraph(const string& input,
    if (input.empty())
      return 0;
  
-+  spelling_cache_.clear();
++  using CachedSpellingList = vector<pair<SyllableId, SpellingProperties>>;
++  hash_map<SyllableId, CachedSpellingList> spelling_cache;
++  auto get_cached_spellings =
++      [&](SyllableId spelling_id) -> const CachedSpellingList& {
++    auto it = spelling_cache.find(spelling_id);
++    if (it != spelling_cache.end())
++      return it->second;
++    auto& result = spelling_cache[spelling_id];
++    SpellingAccessor accessor(prism.QuerySpelling(spelling_id));
++    while (!accessor.exhausted()) {
++      result.emplace_back(accessor.syllable_id(), accessor.properties());
++      accessor.Next();
++    }
++    return result;
++  };
 +
    size_t farthest = 0;
    VertexQueue queue;
@@ -64,7 +56,7 @@ index 11d0efc5..52725c84 100644
    while (!queue.empty()) {
      Vertex vertex(queue.top());
      queue.pop();
-@@ -64,7 +85,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
+@@ -64,7 +84,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                 << ", begin_pos: " << begin_pos;
  
      // see where we can go by advancing a syllable
@@ -73,7 +65,7 @@ index 11d0efc5..52725c84 100644
      set<SyllableId> exact_match_syllables;
      std::string_view current_input(input.data() + begin_pos,
                                     input.length() - begin_pos);
-@@ -106,10 +127,11 @@ int Syllabifier::BuildSyllableGraph(const string& input,
+@@ -106,10 +126,11 @@ int Syllabifier::BuildSyllableGraph(const string& input,
          // when spelling algebra is enabled,
          // a spelling evaluates to a set of syllables;
          // otherwise, it resembles exactly the syllable itself.
@@ -84,12 +76,12 @@ index 11d0efc5..52725c84 100644
 +        // Use cached spelling list to avoid repeated QuerySpelling iteration
 +        // when the same spelling_id appears from multiple vertices.
 +        for (const auto& [syllable_id, raw_props] :
-+             GetCachedSpellings(prism, m.value)) {
++             get_cached_spellings(m.value)) {
 +          EdgeProperties props(raw_props);
            if (strict_spelling_ && matches_input &&
                props.type != kNormalSpelling) {
              // disqualify fuzzy spelling or abbreviation as single word
-@@ -134,7 +156,6 @@ int Syllabifier::BuildSyllableGraph(const string& input,
+@@ -134,7 +155,6 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                end_vertex_type = props.type;
              }
            }
@@ -97,7 +89,7 @@ index 11d0efc5..52725c84 100644
          }
          if (spellings.empty()) {
            DLOG(INFO) << "not spelled.";
-@@ -221,10 +242,9 @@ int Syllabifier::BuildSyllableGraph(const string& input,
+@@ -221,10 +241,9 @@ int Syllabifier::BuildSyllableGraph(const string& input,
          // when spelling algebra is enabled,
          // a spelling evaluates to a set of syllables;
          // otherwise, it resembles exactly the syllable itself.
@@ -106,12 +98,12 @@ index 11d0efc5..52725c84 100644
 -          SyllableId syllable_id = accessor.syllable_id();
 -          SpellingProperties props = accessor.properties();
 +        for (const auto& [syllable_id, raw_props] :
-+             GetCachedSpellings(prism, m.value)) {
++             get_cached_spellings(m.value)) {
 +          SpellingProperties props = raw_props;
            if (props.type < kAbbreviation) {
              props.type = kCompletion;
              props.credibility += kCompletionPenalty;
-@@ -233,7 +253,6 @@ int Syllabifier::BuildSyllableGraph(const string& input,
+@@ -233,7 +252,6 @@ int Syllabifier::BuildSyllableGraph(const string& input,
              // spelling-to-syllable map
              spellings.insert({syllable_id, props});
            }
@@ -119,42 +111,6 @@ index 11d0efc5..52725c84 100644
          }
        }
        if (spellings.empty()) {
-diff --git a/src/rime/algo/syllabifier.h b/src/rime/algo/syllabifier.h
-index 1167e296..222dd01a 100644
---- a/src/rime/algo/syllabifier.h
-+++ b/src/rime/algo/syllabifier.h
-@@ -46,6 +46,11 @@ struct SyllableGraph {
- 
- class Syllabifier {
-  public:
-+  // Cache-aware spelling representation: raw properties for a spelling_id,
-+  // keyed by syllable_id. Populated lazily and reused when the same
-+  // spelling_id is queried multiple times within a BuildSyllableGraph call.
-+  using CachedSpellingList = vector<pair<SyllableId, SpellingProperties>>;
-+
-   Syllabifier() = default;
-   explicit Syllabifier(const string& delimiters,
-                        bool enable_completion = false,
-@@ -63,10 +68,19 @@ class Syllabifier {
-   void CheckOverlappedSpellings(SyllableGraph* graph, size_t start, size_t end);
-   void Transpose(SyllableGraph* graph);
- 
-+  // Lazily populate and return the cached spelling list for |spelling_id|.
-+  // The cache is cleared at the start of each BuildSyllableGraph call.
-+  const CachedSpellingList& GetCachedSpellings(Prism& prism,
-+                                               SyllableId spelling_id);
-+
-   string delimiters_;
-   bool enable_completion_ = false;
-   bool strict_spelling_ = false;
-   Corrector* corrector_ = nullptr;
-+  // Caches QuerySpelling results per spelling_id within a single
-+  // BuildSyllableGraph invocation, avoiding repeated iteration of
-+  // the same SpellingDescriptor list.
-+  hash_map<SyllableId, CachedSpellingList> spelling_cache_;
- };
- 
- }  // namespace rime
 diff --git a/src/rime/dict/prism.cc b/src/rime/dict/prism.cc
 index 17d2e588..537ab260 100644
 --- a/src/rime/dict/prism.cc
