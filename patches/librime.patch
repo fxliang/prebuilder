@@ -244,7 +244,7 @@ index d5261300..745ddeb4 100644
    Notifier commit_notifier_;
    Notifier select_notifier_;
 diff --git a/src/rime/engine.cc b/src/rime/engine.cc
-index 4a54f64c..e073eabf 100644
+index 4a54f64c..4bff6666 100644
 --- a/src/rime/engine.cc
 +++ b/src/rime/engine.cc
 @@ -8,6 +8,7 @@
@@ -255,40 +255,15 @@ index 4a54f64c..e073eabf 100644
  #include <rime/engine.h>
  #include <rime/filter.h>
  #include <rime/formatter.h>
-@@ -33,6 +34,51 @@ class ConcreteEngine : public Engine {
+@@ -33,7 +34,18 @@ class ConcreteEngine : public Engine {
    virtual void ApplySchema(Schema* schema);
    virtual void CommitText(string text);
    virtual void Compose(Context* ctx);
-+  bool IsReverseLookupSegment(const Segment& segment) const {
-+    for (const auto& translator : translators_) {
-+      if (translator->IsReverseLookupSegment(segment))
-+        return true;
-+    }
-+    return false;
-+  }
+-
 +  virtual void CollectInputTabs(size_t pos, vector<InputTabEntry>* tabs) const {
-+    bool reverse_lookup = false;
-+    const Segment* active_segment = nullptr;
-+    for (const Segment& segment : context_->composition()) {
-+      if (pos >= segment.start && pos < segment.end) {
-+        active_segment = &segment;
-+        reverse_lookup = IsReverseLookupSegment(segment);
-+        break;
-+      }
-+    }
 +    for (auto& t : translators_) {
-+      if (reverse_lookup && !t->IsReverseLookupSegment(*active_segment))
-+        continue;
 +      t->CollectInputTabs(pos, tabs);
 +    }
-+  }
-+  virtual bool IsReverseLookupPosition(size_t pos) const {
-+    for (const Segment& segment : context_->composition()) {
-+      if (pos < segment.start || pos >= segment.end)
-+        continue;
-+      return IsReverseLookupSegment(segment);
-+    }
-+    return false;
 +  }
 +  virtual Dictionary* primary_dictionary() const {
 +    for (auto& t : translators_) {
@@ -297,31 +272,19 @@ index 4a54f64c..e073eabf 100644
 +    }
 +    return nullptr;
 +  }
-+  virtual void GetReverseLookupPrefixes(vector<string>* prefixes) const {
-+    for (auto& t : translators_) {
-+      string pfx = t->reverse_lookup_prefix();
-+      if (!pfx.empty())
-+        prefixes->push_back(pfx);
-+    }
-+  }
- 
   protected:
    void InitializeComponents();
-@@ -210,8 +256,12 @@ void ConcreteEngine::TranslateSegments(Segmentation* segments) {
+   void InitializeOptions();
+@@ -210,6 +222,7 @@ void ConcreteEngine::TranslateSegments(Segmentation* segments) {
      size_t len = segment.end - segment.start;
      string input = segments->input().substr(segment.start, len);
      DLOG(INFO) << "translating segment: [" << input << "]";
 +
      auto menu = New<Menu>();
-+    const bool reverse_lookup = IsReverseLookupSegment(segment);
      for (auto& translator : translators_) {
-+      if (reverse_lookup && !translator->IsReverseLookupSegment(segment))
-+        continue;
        auto translation = translator->Query(input, segment);
-       if (!translation)
-         continue;
 diff --git a/src/rime/engine.h b/src/rime/engine.h
-index 6b51a68e..cfdf537a 100644
+index 6b51a68e..7d2b27c2 100644
 --- a/src/rime/engine.h
 +++ b/src/rime/engine.h
 @@ -10,12 +10,14 @@
@@ -339,19 +302,15 @@ index 6b51a68e..cfdf537a 100644
  
  class Engine : public Messenger {
   public:
-@@ -27,6 +29,16 @@ class Engine : public Messenger {
+@@ -27,6 +29,12 @@ class Engine : public Messenger {
    virtual void CommitText(string text) { sink_(text); }
    virtual void Compose(Context* ctx) {}
  
 +  //! Access input tab entries from the translator collection.
 +  virtual void CollectInputTabs(size_t position,
 +                                vector<InputTabEntry>* tabs) const {}
-+  //! Return whether the input position belongs to a reverse lookup segment.
-+  virtual bool IsReverseLookupPosition(size_t position) const { return false; }
 +  //! Get the first available translatordictionary for code lookup.
 +  virtual Dictionary* primary_dictionary() const { return nullptr; }
-+  //! Collect reverse lookup prefixes from all translators.
-+  virtual void GetReverseLookupPrefixes(vector<string>* prefixes) const {}
 +
    Schema* schema() const { return schema_.get(); }
    Context* context() const { return context_.get(); }
@@ -377,7 +336,7 @@ index 37b3dda6..f512da82 100644
  }
  
 diff --git a/src/rime/gear/reverse_lookup_translator.cc b/src/rime/gear/reverse_lookup_translator.cc
-index c8c9e973..e2e23f55 100644
+index c8c9e973..8ac5312f 100644
 --- a/src/rime/gear/reverse_lookup_translator.cc
 +++ b/src/rime/gear/reverse_lookup_translator.cc
 @@ -6,6 +6,7 @@
@@ -483,19 +442,7 @@ index c8c9e973..e2e23f55 100644
                           input,
                           start,
                           end,
-@@ -100,6 +182,11 @@ ReverseLookupTranslator::ReverseLookupTranslator(const Ticket& ticket)
-   config->GetString(name_space_ + "/tag", &tag_);
- }
- 
-+bool ReverseLookupTranslator::IsReverseLookupSegment(
-+    const Segment& segment) const {
-+  return segment.HasTag(tag_);
-+}
-+
- void ReverseLookupTranslator::Initialize() {
-   initialized_ = true;  // no retry
-   if (!engine_)
-@@ -148,16 +235,18 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+@@ -148,16 +230,18 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
      Initialize();  // load reverse dict at first use
    if (!dict_ || !dict_->loaded())
      return nullptr;
@@ -517,7 +464,7 @@ index c8c9e973..e2e23f55 100644
    if (!suffix_.empty() && boost::ends_with(code, suffix_)) {
      code.resize(code.length() - suffix_.length());
    }
-@@ -170,7 +259,7 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+@@ -170,7 +254,7 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
  
    DictEntryIterator iter;
    bool quality = false;
@@ -526,7 +473,7 @@ index c8c9e973..e2e23f55 100644
      if (options_ && options_->enable_completion()) {
        dict_->LookupWords(&iter, code, true, 100, nullptr);
        quality = !iter.exhausted() && (iter.Peek()->remaining_code_length == 0);
-@@ -180,6 +269,9 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+@@ -180,6 +264,9 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
        Syllabifier syllabifier("", true, options_->strict_spelling());
        size_t consumed =
            syllabifier.BuildSyllableGraph(code, *dict_->prism(), &graph);
@@ -536,7 +483,7 @@ index c8c9e973..e2e23f55 100644
        if (consumed == code.length()) {
          auto collector = dict_->Lookup(graph, 0);
          if (collector && !collector->empty() &&
-@@ -199,4 +291,95 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
+@@ -199,4 +286,95 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
    return nullptr;
  }
  
@@ -633,7 +580,7 @@ index c8c9e973..e2e23f55 100644
 +
  }  // namespace rime
 diff --git a/src/rime/gear/reverse_lookup_translator.h b/src/rime/gear/reverse_lookup_translator.h
-index 7ca038f6..69b4185e 100644
+index 7ca038f6..a29dba28 100644
 --- a/src/rime/gear/reverse_lookup_translator.h
 +++ b/src/rime/gear/reverse_lookup_translator.h
 @@ -10,6 +10,7 @@
@@ -644,18 +591,10 @@ index 7ca038f6..69b4185e 100644
  
  namespace rime {
  
-@@ -23,6 +24,27 @@ class ReverseLookupTranslator : public Translator {
+@@ -23,6 +24,18 @@ class ReverseLookupTranslator : public Translator {
  
    virtual an<Translation> Query(const string& input, const Segment& segment);
  
-+  //! Get the configured reverse lookup prefix (e.g. "z")
-+  //! Triggers lazy initialization if not yet done.
-+  RIME_DLL string reverse_lookup_prefix() const {
-+    if (!initialized_)
-+      const_cast<ReverseLookupTranslator*>(this)->Initialize();
-+    return prefix_;
-+  }
-+
 +  //! Return the primary dictionary for code lookup (override).
 +  Dictionary* primary_dictionary() const override { return dict(); }
 +
@@ -667,12 +606,11 @@ index 7ca038f6..69b4185e 100644
 +                        vector<InputTabEntry>* tabs) const override {
 +    CollectReverseLookupTabs(position, tabs);
 +  }
-+  bool IsReverseLookupSegment(const Segment& segment) const override;
 +
   protected:
    void Initialize();
  
-@@ -34,6 +56,13 @@ class ReverseLookupTranslator : public Translator {
+@@ -34,6 +47,13 @@ class ReverseLookupTranslator : public Translator {
    string prefix_;
    string suffix_;
    string tips_;
@@ -1083,7 +1021,7 @@ index aef62178..3b3483e6 100644
    }
    return nullptr;
 diff --git a/src/rime/gear/script_translator.h b/src/rime/gear/script_translator.h
-index e5b60a7a..5a740b3a 100644
+index e5b60a7a..1e990dc9 100644
 --- a/src/rime/gear/script_translator.h
 +++ b/src/rime/gear/script_translator.h
 @@ -11,6 +11,8 @@
@@ -1118,7 +1056,7 @@ index e5b60a7a..5a740b3a 100644
  
  class ScriptTranslator : public Translator,
                           public Memory,
-@@ -53,6 +69,18 @@ class ScriptTranslator : public Translator,
+@@ -53,6 +69,17 @@ class ScriptTranslator : public Translator,
    int max_word_length() const { return max_word_length_; }
    int core_word_length() const;
  
@@ -1132,7 +1070,6 @@ index e5b60a7a..5a740b3a 100644
 +    CollectSyllableTabs(position, tabs);
 +  }
 +  Dictionary* primary_dictionary() const override { return dict(); }
-+  string reverse_lookup_prefix() const override { return ""; }
 +
   protected:
    int max_homophones_ = 1;
@@ -1337,10 +1274,10 @@ index 67bc2292..b7aed6d2 100644
 +
  }  // namespace rime
 diff --git a/src/rime/gear/table_translator.h b/src/rime/gear/table_translator.h
-index 7057ed4b..a7279034 100644
+index 7057ed4b..9aa0e034 100644
 --- a/src/rime/gear/table_translator.h
 +++ b/src/rime/gear/table_translator.h
-@@ -37,6 +37,18 @@ class TableTranslator : public Translator,
+@@ -37,6 +37,17 @@ class TableTranslator : public Translator,
    string GetPrecedingText(size_t start) const;
    UnityTableEncoder* encoder() const { return encoder_.get(); }
  
@@ -1354,12 +1291,11 @@ index 7057ed4b..a7279034 100644
 +    CollectTableTabs(position, tabs);
 +  }
 +  Dictionary* primary_dictionary() const override { return dict(); }
-+  string reverse_lookup_prefix() const override { return ""; }
 +
   protected:
    bool enable_charset_filter_ = false;
    bool enable_encoder_ = false;
-@@ -53,6 +65,7 @@ class TableTranslation : public Translation {
+@@ -53,6 +64,7 @@ class TableTranslation : public Translation {
   public:
    TableTranslation(TranslatorOptions* options,
                     const Language* language,
@@ -1367,7 +1303,7 @@ index 7057ed4b..a7279034 100644
                     const string& input,
                     size_t start,
                     size_t end,
-@@ -76,6 +89,7 @@ class TableTranslation : public Translation {
+@@ -76,6 +88,7 @@ class TableTranslation : public Translation {
  
    TranslatorOptions* options_;
    const Language* language_;
@@ -1507,7 +1443,7 @@ index a69ae741..76438819 100644
    const string& commit_text() const { return commit_text_; }
  
 diff --git a/src/rime/translator.h b/src/rime/translator.h
-index 78ba7e22..43117f0b 100644
+index 78ba7e22..4950fb46 100644
 --- a/src/rime/translator.h
 +++ b/src/rime/translator.h
 @@ -15,10 +15,19 @@
@@ -1530,7 +1466,7 @@ index 78ba7e22..43117f0b 100644
  class Translator : public Class<Translator, const Ticket&> {
   public:
    explicit Translator(const Ticket& ticket)
-@@ -28,6 +37,18 @@ class Translator : public Class<Translator, const Ticket&> {
+@@ -28,6 +37,12 @@ class Translator : public Class<Translator, const Ticket&> {
    virtual an<Translation> Query(const string& input,
                                  const Segment& segment) = 0;
  
@@ -1539,21 +1475,15 @@ index 78ba7e22..43117f0b 100644
 +                                vector<InputTabEntry>* tabs) const {}
 +  //! Override to return the primary dictionary for code lookup.
 +  virtual Dictionary* primary_dictionary() const { return nullptr; }
-+  //! Override to return the reverse lookup prefix, if any.
-+  virtual string reverse_lookup_prefix() const { return ""; }
-+  //! Return whether this translator owns the given reverse lookup segment.
-+  virtual bool IsReverseLookupSegment(const Segment& segment) const {
-+    return false;
-+  }
 +
    string name_space() const { return name_space_; }
  
   protected:
 diff --git a/src/rime_api.h b/src/rime_api.h
-index 2fccde0f..34b0aa08 100644
+index 2fccde0f..2e0c558c 100644
 --- a/src/rime_api.h
 +++ b/src/rime_api.h
-@@ -505,6 +505,54 @@ typedef struct RIME_FLAVORED(rime_api_t) {
+@@ -505,6 +505,47 @@ typedef struct RIME_FLAVORED(rime_api_t) {
                                                size_t index);
  
    Bool (*change_page)(RimeSessionId session_id, Bool backward);
@@ -1589,13 +1519,6 @@ index 2fccde0f..34b0aa08 100644
 +                             size_t* matching_segments);
 +  void (*free_candidate_code)(char** segments, size_t num_segments);
 +
-+  //! Get configured reverse lookup prefix characters.
-+  //! E.g. returns ["z"] for wubi schema with z-prefix reverse lookup.
-+  Bool (*get_reverse_lookup_prefixes)(RimeSessionId session_id,
-+                                      char*** prefixes,
-+                                      size_t* count);
-+  void (*free_reverse_lookup_prefixes)(char** prefixes, size_t count);
-+
 +  //! Select a tab to constrain syllable disambiguation.
 +  //! Adds a constraint to Context and triggers re-composition.
 +  Bool (*select_tab)(RimeSessionId session_id,
@@ -1609,7 +1532,7 @@ index 2fccde0f..34b0aa08 100644
  
  //! API entry
 diff --git a/src/rime_api_impl.h b/src/rime_api_impl.h
-index 30f4514f..d0518b9c 100644
+index 30f4514f..422729c4 100644
 --- a/src/rime_api_impl.h
 +++ b/src/rime_api_impl.h
 @@ -17,6 +17,10 @@
@@ -1623,7 +1546,7 @@ index 30f4514f..d0518b9c 100644
  
  using namespace rime;
  
-@@ -1129,6 +1133,225 @@ void RimeGetStagingDirSecure(char* dir, size_t buffer_size);
+@@ -1129,6 +1133,192 @@ void RimeGetStagingDirSecure(char* dir, size_t buffer_size);
  void RimeGetSyncDirSecure(char* dir, size_t buffer_size);
  const char* RimeGetVersion();
  
@@ -1770,39 +1693,6 @@ index 30f4514f..d0518b9c 100644
 +  }
 +}
 +
-+static Bool RimeGetReverseLookupPrefixes(RimeSessionId session_id,
-+                                         char*** prefixes,
-+                                         size_t* count) {
-+  an<Session> session(Service::instance().GetSession(session_id));
-+  if (!session)
-+    return False;
-+  Engine* engine = session->engine();
-+  if (!engine)
-+    return False;
-+
-+  vector<string> result;
-+  engine->GetReverseLookupPrefixes(&result);
-+
-+  if (result.empty())
-+    return False;
-+
-+  *count = result.size();
-+  *prefixes = new char*[*count];
-+  for (size_t i = 0; i < *count; ++i) {
-+    (*prefixes)[i] = new char[result[i].length() + 1];
-+    std::strcpy((*prefixes)[i], result[i].c_str());
-+  }
-+  return True;
-+}
-+
-+static void RimeFreeReverseLookupPrefixes(char** prefixes, size_t count) {
-+  if (prefixes) {
-+    for (size_t i = 0; i < count; ++i)
-+      delete[] prefixes[i];
-+    delete[] prefixes;
-+  }
-+}
-+
 +static Bool RimeSelectTab(RimeSessionId session_id,
 +                          size_t position,
 +                          const char* label,
@@ -1849,7 +1739,7 @@ index 30f4514f..d0518b9c 100644
  RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
    static RIME_FLAVORED(RimeApi) s_api = {0};
    if (!s_api.data_size) {
-@@ -1232,6 +1455,15 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
+@@ -1232,6 +1422,13 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
      s_api.highlight_candidate_on_current_page =
          &RimeHighlightCandidateOnCurrentPage;
      s_api.change_page = &RimeChangePage;
@@ -1858,8 +1748,6 @@ index 30f4514f..d0518b9c 100644
 +    s_api.free_input_tabs = &RimeFreeInputTabs;
 +    s_api.get_candidate_code = &RimeGetCandidateCode;
 +    s_api.free_candidate_code = &RimeFreeCandidateCode;
-+    s_api.get_reverse_lookup_prefixes = &RimeGetReverseLookupPrefixes;
-+    s_api.free_reverse_lookup_prefixes = &RimeFreeReverseLookupPrefixes;
 +    s_api.select_tab = &RimeSelectTab;
 +    s_api.clear_tabs = &RimeClearTabs;
    }
