@@ -1,7 +1,7 @@
-From e1d01afc1fb519a04c13546059adbc400d377992 Mon Sep 17 00:00:00 2001
+From 525819e1446bf35233da902903115008ed78093a Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Thu, 23 Jul 2026 15:41:38 +0800
-Subject: [PATCH 1/4] perf(user_dict): in-memory sorted cache for user
+Subject: [PATCH 1/7] perf(user_dict): in-memory sorted cache for user
  dictionary queries
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -451,10 +451,10 @@ index 5ebeac0f..2cad6181 100644
 2.43.0
 
 
-From aa78e7368dd9d8920c82f857e230463bdc2fbeac Mon Sep 17 00:00:00 2001
+From a977507fd8ba952a61a2493130102f9e7017b0a7 Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Thu, 23 Jul 2026 22:00:10 +0800
-Subject: [PATCH 2/4] fix(user_dict): set e->code in RecruitCacheEntry; fix
+Subject: [PATCH 2/7] fix(user_dict): set e->code in RecruitCacheEntry; fix
  pending code_key for new_entry_prefix
 
 ---
@@ -560,10 +560,10 @@ index 2cad6181..9ec52a52 100644
 2.43.0
 
 
-From 9de3de212a3f7fe35c3b06fcd48654032435fea2 Mon Sep 17 00:00:00 2001
+From 07396af6053dd180cf42bca1ab5e38f2642f8fbf Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Fri, 24 Jul 2026 08:08:09 +0800
-Subject: [PATCH 3/4] fix review part 2
+Subject: [PATCH 3/7] fix review part 2
 
 ---
  src/rime/dict/user_dictionary.cc | 86 ++++++++++++++++----------------
@@ -745,10 +745,10 @@ index 9ec52a52..31d0a397 100644
 2.43.0
 
 
-From 8a007cab3e85a81936f004e12e976f911bc071b0 Mon Sep 17 00:00:00 2001
+From 3ea5bf6bd02c0c0e9c288712283ac1a395dea4dd Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Fri, 24 Jul 2026 15:49:30 +0800
-Subject: [PATCH 4/4] fix(user_dict): ensure custom_code ends with trailing
+Subject: [PATCH 4/7] fix(user_dict): ensure custom_code ends with trailing
  space in UpdateEntry
 
 User DB key format requires a trailing space before the tab separator
@@ -778,6 +778,458 @@ index 20daefe5..36ce3780 100644
    string key(code_str + '\t' + entry.text);
    string code_key(code_str);
    string value;
+-- 
+2.43.0
+
+
+From 15b4f2ca820b132da7462a10b21caf7377ccc47c Mon Sep 17 00:00:00 2001
+From: fxliang <fx.liang@outlook.com>
+Date: Fri, 31 Jul 2026 10:32:44 +0800
+Subject: [PATCH 5/7] perf(user_dict): flatten in-memory cache and bound
+ LevelDB memory
+
+---
+ src/rime/dict/level_db.cc        | 17 ++++++++++-
+ src/rime/dict/user_dictionary.cc | 52 ++++++++++++++++++++++++++------
+ src/rime/dict/user_dictionary.h  |  8 +++--
+ 3 files changed, 64 insertions(+), 13 deletions(-)
+
+diff --git a/src/rime/dict/level_db.cc b/src/rime/dict/level_db.cc
+index 9a2eb3de..d2a1fa18 100644
+--- a/src/rime/dict/level_db.cc
++++ b/src/rime/dict/level_db.cc
+@@ -5,6 +5,7 @@
+ // 2014-12-04 Chen Gong <chen.sst@gmail.com>
+ //
+ 
++#include <leveldb/cache.h>
+ #include <leveldb/db.h>
+ #include <leveldb/write_batch.h>
+ #include <rime/common.h>
+@@ -16,6 +17,14 @@ namespace rime {
+ 
+ static const char* kMetaCharacter = "\x01";
+ 
++static leveldb::Cache* SharedBlockCache() {
++  // The in-memory user dict cache serves most lookups, so LevelDB only backs
++  // point reads/writes and infrequent scans. Share one small block cache across
++  // all user dbs instead of letting each DB allocate its default 8MB cache.
++  static leveldb::Cache* cache = leveldb::NewLRUCache(2 << 20);
++  return cache;
++}
++
+ struct LevelDbCursor {
+   leveldb::Iterator* iterator = nullptr;
+ 
+@@ -54,6 +63,10 @@ struct LevelDbWrapper {
+   leveldb::Status Open(const path& file_path, bool readonly) {
+     leveldb::Options options;
+     options.create_if_missing = !readonly;
++    options.block_cache = SharedBlockCache();
++    // user dict writes are small and frequent; a 4MB default memtable is
++    // overkill and would be freed only on flush
++    options.write_buffer_size = 2 << 20;
+     return leveldb::DB::Open(options, file_path.string(), &ptr);
+   }
+ 
+@@ -217,7 +230,9 @@ bool LevelDb::Restore(const path& snapshot_file) {
+ 
+ bool LevelDb::Recover() {
+   LOG(INFO) << "trying to recover db '" << name() << "'.";
+-  auto status = leveldb::RepairDB(file_path().string(), leveldb::Options());
++  leveldb::Options options;
++  options.block_cache = SharedBlockCache();
++  auto status = leveldb::RepairDB(file_path().string(), options);
+   if (status.ok()) {
+     LOG(INFO) << "repair finished.";
+     return true;
+diff --git a/src/rime/dict/user_dictionary.cc b/src/rime/dict/user_dictionary.cc
+index 36ce3780..a7b44539 100644
+--- a/src/rime/dict/user_dictionary.cc
++++ b/src/rime/dict/user_dictionary.cc
+@@ -308,9 +308,20 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
+ // Build sorted cache from DB at load time.
+ bool UserDictionary::BuildCache() {
+   cache_.clear();
++  cache_blob_.clear();
+   auto accessor = db_->Query("");
+   if (!accessor || !accessor->Jump(" "))
+     return false;
++  struct CacheEntryRecord {
++    size_t code_off;
++    size_t code_len;
++    size_t text_off;
++    size_t text_len;
++    double dee;
++    int commits;
++    TickCount tick;
++  };
++  vector<CacheEntryRecord> records;
+   string key, value;
+   while (accessor->GetNextRecord(&key, &value)) {
+     size_t tab = key.find('\t');
+@@ -321,8 +332,26 @@ bool UserDictionary::BuildCache() {
+       continue;
+     if (v.commits < 0)
+       continue;
+-    cache_.push_back(
+-        {key.substr(0, tab), key.substr(tab + 1), v.dee, v.commits, v.tick});
++    CacheEntryRecord rec;
++    rec.code_off = cache_blob_.size();
++    rec.code_len = tab;
++    cache_blob_.append(key.data(), tab);
++    rec.text_off = cache_blob_.size();
++    rec.text_len = key.size() - tab - 1;
++    cache_blob_.append(key.data() + tab + 1, key.size() - tab - 1);
++    rec.dee = v.dee;
++    rec.commits = v.commits;
++    rec.tick = v.tick;
++    records.push_back(rec);
++  }
++  // views are only constructed after cache_blob_ is fully built, so they are
++  // not invalidated by any further reallocation.
++  cache_.reserve(records.size());
++  std::string_view blob(cache_blob_);
++  for (const auto& rec : records) {
++    cache_.push_back({blob.substr(rec.code_off, rec.code_len),
++                      blob.substr(rec.text_off, rec.text_len), rec.dee,
++                      rec.commits, rec.tick});
+   }
+   sort(cache_.begin(), cache_.end(),
+        [](const CacheEntry& a, const CacheEntry& b) {
+@@ -333,6 +362,8 @@ bool UserDictionary::BuildCache() {
+   pending_.clear();
+   cache_built_tick_ = tick_;
+   cache_built_ = true;
++  LOG(INFO) << "user dict cache rebuilt: " << cache_.size() << " entries, "
++            << cache_blob_.size() << " bytes";
+   return true;
+ }
+ 
+@@ -342,7 +373,8 @@ bool UserDictionary::Reload() {
+   return BuildCache();
+ }
+ 
+-bool UserDictionary::starts_with(const string& s, const string& prefix) const {
++bool UserDictionary::starts_with(std::string_view s,
++                                 const string& prefix) const {
+   return s.size() >= prefix.size() &&
+          equal(prefix.begin(), prefix.end(), s.begin());
+ }
+@@ -381,8 +413,8 @@ void UserDictionary::RecruitPredictiveEntry(
+   auto& entries = (*result)[end_pos];
+   auto& e = entries.back();
+   // convert code string to numeric syllable ids
+-  vector<string> syllables =
+-      strings::split(entry.code, " ", strings::SplitBehavior::SkipToken);
++  vector<string> syllables = strings::split(std::string(entry.code), " ",
++                                            strings::SplitBehavior::SkipToken);
+   Code numeric_code;
+   for (const auto& s : syllables) {
+     auto found = syllabary_.find(s);
+@@ -433,10 +465,10 @@ void UserDictionary::CacheLookup(const SyllableGraph& syll_graph,
+           [](const CacheEntry& e, const string& p) { return e.code < p; });
+ 
+       // collect exact-matching entries (code == prefix)
+-      hash_set<string> seen;
++      hash_set<std::string_view> seen;
+       while (it != cache_.end() && it->code == prefix) {
+         bool overridden = false;
+-        auto pit = pending_.find(prefix + '\t' + it->text);
++        auto pit = pending_.find(prefix + '\t' + std::string(it->text));
+         if (pit != pending_.end()) {
+           const auto& p = pit->second;
+           if (p.type == PendingUpdate::kDelete) {
+@@ -511,10 +543,12 @@ void UserDictionary::CacheLookup(const SyllableGraph& syll_graph,
+               [](const CacheEntry& e, const string& p) { return e.code < p; });
+           while (pred != cache_.end() && pred->code == prefix)
+             ++pred;
+-          hash_set<string> seen_pred;
++          hash_set<std::string_view> seen_pred;
+           while (pred != cache_.end() && starts_with(pred->code, prefix)) {
+             bool overridden = false;
+-            auto pit = pending_.find(pred->code + '\t' + pred->text);
++            auto pit =
++                pending_.find(std::string(pred->code) + '\t' +
++                              std::string(pred->text));
+             if (pit != pending_.end()) {
+               const auto& p = pit->second;
+               if (p.type == PendingUpdate::kDelete) {
+diff --git a/src/rime/dict/user_dictionary.h b/src/rime/dict/user_dictionary.h
+index 31d0a397..27b03c32 100644
+--- a/src/rime/dict/user_dictionary.h
++++ b/src/rime/dict/user_dictionary.h
+@@ -7,6 +7,7 @@
+ #ifndef RIME_USER_DICTIONARY_H_
+ #define RIME_USER_DICTIONARY_H_
+ 
++#include <string_view>
+ #include <time.h>
+ #include <rime/common.h>
+ #include <rime/component.h>
+@@ -102,8 +103,8 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
+ 
+  private:
+   struct CacheEntry {
+-    string code;  // pinyin code like "ni hao"
+-    string text;  // entry text
++    std::string_view code;  // pinyin code like "ni hao"; points into cache_blob_
++    std::string_view text;  // entry text; points into cache_blob_
+     double dee;   // difficulty estimate
+     int commits;
+     TickCount tick;
+@@ -130,6 +131,7 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
+ 
+   bool cache_built_ = false;
+   TickCount cache_built_tick_ = 0;
++  std::string cache_blob_;  // backing storage for CacheEntry code/text views
+   vector<CacheEntry> cache_;
+   std::unordered_map<string, PendingUpdate> pending_;
+ 
+@@ -152,7 +154,7 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
+                               double credibility,
+                               double quality_len,
+                               hash_map<int, DictEntryList>* result);
+-  bool starts_with(const string& s, const string& prefix) const;
++  bool starts_with(std::string_view s, const string& prefix) const;
+ };
+ 
+ class UserDictionaryComponent : public UserDictionary::Component {
+-- 
+2.43.0
+
+
+From 1f8d5a3ae1b972f63d4ddce99990d91d6ea9f01a Mon Sep 17 00:00:00 2001
+From: fxliang <fx.liang@outlook.com>
+Date: Fri, 31 Jul 2026 12:06:53 +0800
+Subject: [PATCH 6/7] perf(user_dict): skip LevelDB access in cache lookups
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Cached lookups serve entirely from the in-memory cache, but Lookup() still
+opened a DB accessor (Query + Jump) on every call — LevelDB iterator I/O that
+became a ~3x slowdown once the user DB switched to a small shared block cache
+and 256KB write buffer to bound memory.
+
+- Create the accessor only in the DfsLookup fallback path.
+- Fast-path CacheLookup exact-match/predictive loops when pending_ is empty
+  so the per-entry pending key construction is skipped.
+
+LevelDB lookups drop from ~4.5us back to ~1.3us (pre-flatten level); cached
+queries now only touch LevelDB for the tick point-read.
+---
+ src/rime/dict/user_dictionary.cc | 95 ++++++++++++++++++++------------
+ 1 file changed, 60 insertions(+), 35 deletions(-)
+
+diff --git a/src/rime/dict/user_dictionary.cc b/src/rime/dict/user_dictionary.cc
+index a7b44539..c3b4f899 100644
+--- a/src/rime/dict/user_dictionary.cc
++++ b/src/rime/dict/user_dictionary.cc
+@@ -466,30 +466,42 @@ void UserDictionary::CacheLookup(const SyllableGraph& syll_graph,
+ 
+       // collect exact-matching entries (code == prefix)
+       hash_set<std::string_view> seen;
+-      while (it != cache_.end() && it->code == prefix) {
+-        bool overridden = false;
+-        auto pit = pending_.find(prefix + '\t' + std::string(it->text));
+-        if (pit != pending_.end()) {
+-          const auto& p = pit->second;
+-          if (p.type == PendingUpdate::kDelete) {
+-            overridden = true;
+-          } else {
+-            // use updated entry from pending
+-            RecruitCacheEntry({p.code, p.text, p.dee, p.commits, p.tick},
+-                              end_pos, state->code, state->present_tick,
++      if (!pending_.empty()) {
++        // pending_ holds uncommitted writes; check each entry for overrides
++        while (it != cache_.end() && it->code == prefix) {
++          bool overridden = false;
++          auto pit = pending_.find(prefix + '\t' + std::string(it->text));
++          if (pit != pending_.end()) {
++            const auto& p = pit->second;
++            if (p.type == PendingUpdate::kDelete) {
++              overridden = true;
++            } else {
++              // use updated entry from pending
++              RecruitCacheEntry({p.code, p.text, p.dee, p.commits, p.tick},
++                                end_pos, state->code, state->present_tick,
++                                state->credibility.back(),
++                                state->quality_len.back(),
++                                &state->query_result);
++              seen.insert(p.text);
++              overridden = true;
++            }
++          }
++          if (!overridden) {
++            RecruitCacheEntry(*it, end_pos, state->code, state->present_tick,
+                               state->credibility.back(),
+                               state->quality_len.back(), &state->query_result);
+-            seen.insert(p.text);
+-            overridden = true;
++            seen.insert(it->text);
+           }
++          ++it;
+         }
+-        if (!overridden) {
++      } else {
++        // fast path: no uncommitted writes; cache_ is authoritative
++        while (it != cache_.end() && it->code == prefix) {
+           RecruitCacheEntry(*it, end_pos, state->code, state->present_tick,
+                             state->credibility.back(),
+                             state->quality_len.back(), &state->query_result);
+-          seen.insert(it->text);
++          ++it;
+         }
+-        ++it;
+       }
+       // add new entries from pending_ that aren't in cache
+       for (const auto& kv : pending_) {
+@@ -544,33 +556,45 @@ void UserDictionary::CacheLookup(const SyllableGraph& syll_graph,
+           while (pred != cache_.end() && pred->code == prefix)
+             ++pred;
+           hash_set<std::string_view> seen_pred;
+-          while (pred != cache_.end() && starts_with(pred->code, prefix)) {
+-            bool overridden = false;
+-            auto pit =
+-                pending_.find(std::string(pred->code) + '\t' +
+-                              std::string(pred->text));
+-            if (pit != pending_.end()) {
+-              const auto& p = pit->second;
+-              if (p.type == PendingUpdate::kDelete) {
+-                overridden = true;
+-              } else {
++          if (!pending_.empty()) {
++            // pending_ holds uncommitted writes; check each entry for overrides
++            while (pred != cache_.end() && starts_with(pred->code, prefix)) {
++              bool overridden = false;
++              auto pit =
++                  pending_.find(std::string(pred->code) + '\t' +
++                                std::string(pred->text));
++              if (pit != pending_.end()) {
++                const auto& p = pit->second;
++                if (p.type == PendingUpdate::kDelete) {
++                  overridden = true;
++                } else {
++                  RecruitPredictiveEntry(
++                      {p.code, p.text, p.dee, p.commits, p.tick}, end_pos,
++                      state->depth(), state->present_tick,
++                      state->credibility.back(), state->quality_len.back(),
++                      &state->query_result);
++                  seen_pred.insert(p.text);
++                  overridden = true;
++                }
++              }
++              if (!overridden) {
+                 RecruitPredictiveEntry(
+-                    {p.code, p.text, p.dee, p.commits, p.tick}, end_pos,
+-                    state->depth(), state->present_tick,
++                    *pred, end_pos, state->depth(), state->present_tick,
+                     state->credibility.back(), state->quality_len.back(),
+                     &state->query_result);
+-                seen_pred.insert(p.text);
+-                overridden = true;
++                seen_pred.insert(pred->text);
+               }
++              ++pred;
+             }
+-            if (!overridden) {
++          } else {
++            // fast path: no uncommitted writes; cache_ is authoritative
++            while (pred != cache_.end() && starts_with(pred->code, prefix)) {
+               RecruitPredictiveEntry(
+                   *pred, end_pos, state->depth(), state->present_tick,
+                   state->credibility.back(), state->quality_len.back(),
+                   &state->query_result);
+-              seen_pred.insert(pred->text);
++              ++pred;
+             }
+-            ++pred;
+           }
+           // predictive entries from pending_ not yet in cache
+           for (const auto& kv : pending_) {
+@@ -620,8 +644,6 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
+   state.present_tick = tick_ + 1;
+   state.credibility.push_back(initial_credibility);
+   state.quality_len.push_back(0.0);
+-  state.accessor = db_->Query("");
+-  state.accessor->Jump(" ");  // skip metadata
+   string prefix;
+   // Rebuild only when deferred. Local changes are reflected by pending_.
+   // External sync, merge, and restore operations must call Reload().
+@@ -631,6 +653,9 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
+   if (cache_built_) {
+     CacheLookup(syll_graph, start_pos, prefix, &state);
+   } else {
++    // CacheLookup does not need the DB accessor; only DfsLookup scans the DB.
++    state.accessor = db_->Query("");
++    state.accessor->Jump(" ");  // skip metadata
+     DfsLookup(syll_graph, start_pos, prefix, &state);
+   }
+   if (state.query_result.empty())
+-- 
+2.43.0
+
+
+From 24afa2144c4d193ac8d5fabb9a88d6931d189abd Mon Sep 17 00:00:00 2001
+From: fxliang <fx.liang@outlook.com>
+Date: Sat, 1 Aug 2026 11:34:17 +0800
+Subject: [PATCH 7/7] style(user_dict): apply clang-format to cache lookup code
+
+---
+ src/rime/dict/user_dictionary.cc | 14 ++++++--------
+ src/rime/dict/user_dictionary.h  |  5 +++--
+ 2 files changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/src/rime/dict/user_dictionary.cc b/src/rime/dict/user_dictionary.cc
+index c3b4f899..644d8ca6 100644
+--- a/src/rime/dict/user_dictionary.cc
++++ b/src/rime/dict/user_dictionary.cc
+@@ -477,11 +477,10 @@ void UserDictionary::CacheLookup(const SyllableGraph& syll_graph,
+               overridden = true;
+             } else {
+               // use updated entry from pending
+-              RecruitCacheEntry({p.code, p.text, p.dee, p.commits, p.tick},
+-                                end_pos, state->code, state->present_tick,
+-                                state->credibility.back(),
+-                                state->quality_len.back(),
+-                                &state->query_result);
++              RecruitCacheEntry(
++                  {p.code, p.text, p.dee, p.commits, p.tick}, end_pos,
++                  state->code, state->present_tick, state->credibility.back(),
++                  state->quality_len.back(), &state->query_result);
+               seen.insert(p.text);
+               overridden = true;
+             }
+@@ -560,9 +559,8 @@ void UserDictionary::CacheLookup(const SyllableGraph& syll_graph,
+             // pending_ holds uncommitted writes; check each entry for overrides
+             while (pred != cache_.end() && starts_with(pred->code, prefix)) {
+               bool overridden = false;
+-              auto pit =
+-                  pending_.find(std::string(pred->code) + '\t' +
+-                                std::string(pred->text));
++              auto pit = pending_.find(std::string(pred->code) + '\t' +
++                                       std::string(pred->text));
+               if (pit != pending_.end()) {
+                 const auto& p = pit->second;
+                 if (p.type == PendingUpdate::kDelete) {
+diff --git a/src/rime/dict/user_dictionary.h b/src/rime/dict/user_dictionary.h
+index 27b03c32..a961b8e5 100644
+--- a/src/rime/dict/user_dictionary.h
++++ b/src/rime/dict/user_dictionary.h
+@@ -103,9 +103,10 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
+ 
+  private:
+   struct CacheEntry {
+-    std::string_view code;  // pinyin code like "ni hao"; points into cache_blob_
++    std::string_view
++        code;  // pinyin code like "ni hao"; points into cache_blob_
+     std::string_view text;  // entry text; points into cache_blob_
+-    double dee;   // difficulty estimate
++    double dee;             // difficulty estimate
+     int commits;
+     TickCount tick;
+   };
 -- 
 2.43.0
 
