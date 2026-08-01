@@ -1,7 +1,7 @@
-From 525819e1446bf35233da902903115008ed78093a Mon Sep 17 00:00:00 2001
+From e6fe883a26c6a8b851100b7e6864d9142022c8ea Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Thu, 23 Jul 2026 15:41:38 +0800
-Subject: [PATCH 1/7] perf(user_dict): in-memory sorted cache for user
+Subject: [PATCH 1/8] perf(user_dict): in-memory sorted cache for user
  dictionary queries
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -451,10 +451,10 @@ index 5ebeac0f..2cad6181 100644
 2.43.0
 
 
-From a977507fd8ba952a61a2493130102f9e7017b0a7 Mon Sep 17 00:00:00 2001
+From 85fa791c5f0c90333d0f931394e400002fcdb429 Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Thu, 23 Jul 2026 22:00:10 +0800
-Subject: [PATCH 2/7] fix(user_dict): set e->code in RecruitCacheEntry; fix
+Subject: [PATCH 2/8] fix(user_dict): set e->code in RecruitCacheEntry; fix
  pending code_key for new_entry_prefix
 
 ---
@@ -560,10 +560,10 @@ index 2cad6181..9ec52a52 100644
 2.43.0
 
 
-From 07396af6053dd180cf42bca1ab5e38f2642f8fbf Mon Sep 17 00:00:00 2001
+From dfefb3ef4320605d51a28009360823f6f7c5672c Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Fri, 24 Jul 2026 08:08:09 +0800
-Subject: [PATCH 3/7] fix review part 2
+Subject: [PATCH 3/8] fix review part 2
 
 ---
  src/rime/dict/user_dictionary.cc | 86 ++++++++++++++++----------------
@@ -745,10 +745,10 @@ index 9ec52a52..31d0a397 100644
 2.43.0
 
 
-From 3ea5bf6bd02c0c0e9c288712283ac1a395dea4dd Mon Sep 17 00:00:00 2001
+From 9463d328d86d07abfde67cc96caa50c2536f0779 Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Fri, 24 Jul 2026 15:49:30 +0800
-Subject: [PATCH 4/7] fix(user_dict): ensure custom_code ends with trailing
+Subject: [PATCH 4/8] fix(user_dict): ensure custom_code ends with trailing
  space in UpdateEntry
 
 User DB key format requires a trailing space before the tab separator
@@ -782,10 +782,10 @@ index 20daefe5..36ce3780 100644
 2.43.0
 
 
-From 15b4f2ca820b132da7462a10b21caf7377ccc47c Mon Sep 17 00:00:00 2001
+From 14fd3e0f84c507e043b71e761fe7498188b11eb6 Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Fri, 31 Jul 2026 10:32:44 +0800
-Subject: [PATCH 5/7] perf(user_dict): flatten in-memory cache and bound
+Subject: [PATCH 5/8] perf(user_dict): flatten in-memory cache and bound
  LevelDB memory
 
 ---
@@ -999,10 +999,10 @@ index 31d0a397..27b03c32 100644
 2.43.0
 
 
-From 1f8d5a3ae1b972f63d4ddce99990d91d6ea9f01a Mon Sep 17 00:00:00 2001
+From bca6ea151a24be127480a7260825556b275c5da4 Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Fri, 31 Jul 2026 12:06:53 +0800
-Subject: [PATCH 6/7] perf(user_dict): skip LevelDB access in cache lookups
+Subject: [PATCH 6/8] perf(user_dict): skip LevelDB access in cache lookups
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -1171,10 +1171,10 @@ index a7b44539..c3b4f899 100644
 2.43.0
 
 
-From 24afa2144c4d193ac8d5fabb9a88d6931d189abd Mon Sep 17 00:00:00 2001
+From 376648728e897b5d78e46f713ca21128ea60379a Mon Sep 17 00:00:00 2001
 From: fxliang <fx.liang@outlook.com>
 Date: Sat, 1 Aug 2026 11:34:17 +0800
-Subject: [PATCH 7/7] style(user_dict): apply clang-format to cache lookup code
+Subject: [PATCH 7/8] style(user_dict): apply clang-format to cache lookup code
 
 ---
  src/rime/dict/user_dictionary.cc | 14 ++++++--------
@@ -1230,6 +1230,267 @@ index 27b03c32..a961b8e5 100644
      int commits;
      TickCount tick;
    };
+-- 
+2.43.0
+
+
+From 8605c6d255b9f25119d05603745ad9b712dd6cf6 Mon Sep 17 00:00:00 2001
+From: fxliang <fx.liang@outlook.com>
+Date: Sat, 1 Aug 2026 11:54:14 +0800
+Subject: [PATCH 8/8] test(user_dict): add regression tests for cache path
+
+---
+ test/user_dictionary_test.cc | 241 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 241 insertions(+)
+ create mode 100644 test/user_dictionary_test.cc
+
+diff --git a/test/user_dictionary_test.cc b/test/user_dictionary_test.cc
+new file mode 100644
+index 00000000..8ad27c66
+--- /dev/null
++++ b/test/user_dictionary_test.cc
+@@ -0,0 +1,241 @@
++//
++// Copyright RIME Developers
++// Distributed under the BSD License
++//
++// Regression tests for UserDictionary cache path.
++//
++#include <gtest/gtest.h>
++#include <rime/common.h>
++#include <rime/algo/syllabifier.h>
++#include <rime/dict/dictionary.h>
++#include <rime/dict/dict_compiler.h>
++#include <rime/dict/prism.h>
++#include <rime/dict/table.h>
++#include <rime/dict/text_db.h>
++#include <rime/dict/user_dictionary.h>
++#include <rime/dict/user_db.h>
++
++using namespace rime;
++
++using TestDb = UserDbWrapper<TextDb>;
++
++static an<Dictionary> sys_dict;
++
++static void BuildSysDict() {
++  if (sys_dict)
++    return;
++  sys_dict.reset(new Dictionary("dictionary_test", {},
++                                {New<Table>(path{"dictionary_test.table.bin"})},
++                                New<Prism>(path{"dictionary_test.prism.bin"})));
++  sys_dict->Remove();
++  DictCompiler dc(sys_dict.get());
++  ASSERT_TRUE(dc.Compile(path()));
++  ASSERT_TRUE(sys_dict->Load());
++}
++
++class UserDictionaryTest : public ::testing::Test {
++ protected:
++  static void SetUpTestSuite() { BuildSysDict(); }
++
++  void SetUp() override {
++    db = New<TestDb>(path{"user_dict_test.txt"}, "user_dict_test");
++    if (db->Exists())
++      db->Remove();
++    ASSERT_TRUE(db->Open());
++    ASSERT_TRUE(db->MetaUpdate("/tick", "100"));
++    ud = std::make_unique<UserDictionary>("user_dict_test", db);
++    ud->Attach(sys_dict->primary_table(), sys_dict->prism());
++    ASSERT_TRUE(ud->Load());
++  }
++
++  void TearDown() override {
++    ud.reset();
++    db->Close();
++    if (db->Exists())
++      db->Remove();
++  }
++
++  // key format: code + " \t" + text  (trailing space before tab, see
++  // user_db.cc)
++  void AddEntry(const string& code,
++                const string& text,
++                int commits = 1,
++                TickCount tick = 50) {
++    UserDbValue v;
++    v.commits = commits;
++    v.dee = 0.5;
++    v.tick = tick;
++    ASSERT_TRUE(db->Update(code + " \t" + text, v.Pack()));
++  }
++
++  an<DictEntry> DoLookupWords(const string& input,
++                              const string& expected_text,
++                              bool predictive = false) {
++    UserDictEntryIterator iter;
++    ud->LookupWords(&iter, input, predictive, 0, nullptr);
++    while (!iter.exhausted()) {
++      auto e = iter.Peek();
++      if (e && e->text == expected_text)
++        return e;
++      iter.Next();
++    }
++    return nullptr;
++  }
++
++  an<DictEntry> DoPredictiveLookup(const string& input,
++                                   const string& expected_text) {
++    SyllableGraph g;
++    Syllabifier syllabifier;
++    if (syllabifier.BuildSyllableGraph(input, *sys_dict->prism(), &g) <= 0)
++      return nullptr;
++    int depth = 1;
++    auto collector = ud->Lookup(g, 0, 0, depth, 0);
++    if (!collector)
++      return nullptr;
++    for (auto& kv : *collector) {
++      auto& iter = kv.second;
++      while (!iter.exhausted()) {
++        auto e = iter.Peek();
++        if (e && e->text == expected_text)
++          return e;
++        iter.Next();
++      }
++    }
++    return nullptr;
++  }
++
++  an<TestDb> db;
++  the<UserDictionary> ud;
++};
++
++TEST_F(UserDictionaryTest, ExactMatchFields) {
++  AddEntry("ni", "你");
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoLookupWords("ni", "你");
++  ASSERT_NE(nullptr, e);
++  EXPECT_EQ("你", e->text);
++  EXPECT_EQ(1, e->commit_count);
++}
++
++TEST_F(UserDictionaryTest, ExactMatchMultipleEntries) {
++  AddEntry("da", "大");
++  AddEntry("da", "打");
++  ASSERT_TRUE(ud->Reload());
++  auto e1 = DoLookupWords("da", "大");
++  ASSERT_NE(nullptr, e1);
++  EXPECT_EQ("大", e1->text);
++  auto e2 = DoLookupWords("da", "打");
++  ASSERT_NE(nullptr, e2);
++  EXPECT_EQ("打", e2->text);
++}
++
++TEST_F(UserDictionaryTest, UpdateEntryAfterLookup) {
++  AddEntry("ni", "你", 1);
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoLookupWords("ni", "你");
++  ASSERT_NE(nullptr, e);
++  EXPECT_EQ(1, e->commit_count);
++  // update via UpdateEntry
++  DictEntry update;
++  update.text = "你";
++  update.custom_code = "ni";
++  update.commit_count = 1;
++  ASSERT_TRUE(ud->UpdateEntry(update, 1));
++  // should reflect the update via pending_
++  auto e2 = DoLookupWords("ni", "你");
++  ASSERT_NE(nullptr, e2);
++  EXPECT_GE(e2->commit_count, 1);
++}
++
++TEST_F(UserDictionaryTest, AddNewEntryViaUpdateEntry) {
++  DictEntry entry;
++  entry.text = "泥";
++  entry.custom_code = "ni";
++  entry.commit_count = 1;
++  ASSERT_TRUE(ud->UpdateEntry(entry, 1));
++  auto e = DoLookupWords("ni", "泥");
++  ASSERT_NE(nullptr, e);
++  EXPECT_EQ("泥", e->text);
++}
++
++TEST_F(UserDictionaryTest, DeleteEntry) {
++  AddEntry("shi", "是");
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoLookupWords("shi", "是");
++  ASSERT_NE(nullptr, e);
++  // delete
++  DictEntry del;
++  del.text = "是";
++  del.custom_code = "shi";
++  ASSERT_TRUE(ud->UpdateEntry(del, -1));
++  // should not appear after delete
++  auto e2 = DoLookupWords("shi", "是");
++  ASSERT_EQ(nullptr, e2);
++}
++
++TEST_F(UserDictionaryTest, DeleteThenRevive) {
++  AddEntry("bu", "不");
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoLookupWords("bu", "不");
++  ASSERT_NE(nullptr, e);
++  DictEntry del;
++  del.text = "不";
++  del.custom_code = "bu";
++  ASSERT_TRUE(ud->UpdateEntry(del, -1));
++  // revive
++  DictEntry revive;
++  revive.text = "不";
++  revive.custom_code = "bu";
++  ASSERT_TRUE(ud->UpdateEntry(revive, 1));
++  auto e2 = DoLookupWords("bu", "不");
++  ASSERT_NE(nullptr, e2);
++  EXPECT_EQ("不", e2->text);
++}
++
++TEST_F(UserDictionaryTest, PredictiveLookup) {
++  AddEntry("ni", "你");
++  AddEntry("ni hao", "你好");
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoPredictiveLookup("ni", "你好");
++  ASSERT_NE(nullptr, e) << "predictive lookup should find '你好' via 'ni'";
++  EXPECT_EQ("你好", e->text);
++  EXPECT_GT(e->matching_code_size, 0);
++}
++
++// TransactionAbort is not applicable to TextDb (no transaction support).
++// Tests using LevelDb-backed user dicts should cover this.
++
++TEST_F(UserDictionaryTest, BatchAddThenLookup) {
++  const int kCount = 50;
++  for (int i = 0; i < kCount; ++i) {
++    DictEntry e;
++    e.text = "test" + std::to_string(i);
++    e.custom_code = "ni";
++    e.commit_count = 1;
++    ASSERT_TRUE(ud->UpdateEntry(e, 1));
++  }
++  UserDictEntryIterator iter;
++  ud->LookupWords(&iter, "ni", true, 0, nullptr);
++  ASSERT_GT(iter.cache_size(), 0);
++}
++
++TEST_F(UserDictionaryTest, MultipleCodeSyllables) {
++  AddEntry("ni hao", "你好");
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoLookupWords("ni hao", "你好");
++  ASSERT_NE(nullptr, e);
++  EXPECT_EQ("你好", e->text);
++}
++
++TEST_F(UserDictionaryTest, UpdateEntryRoundTrip) {
++  AddEntry("ren", "人");
++  ASSERT_TRUE(ud->Reload());
++  auto e = DoLookupWords("ren", "人");
++  ASSERT_NE(nullptr, e);
++  DictEntry update;
++  update.text = e->text;
++  update.code = e->code;
++  update.custom_code = "ren";
++  update.commit_count = e->commit_count;
++  ASSERT_TRUE(ud->UpdateEntry(update, 1));
++}
 -- 
 2.43.0
 
